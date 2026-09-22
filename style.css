@@ -1,20 +1,20 @@
-#ttotto-nsfw-settings {
+#ttotto-sfw-settings {
     margin: 0;
 }
 
-#tns-developer-title,
-#tns-popup-developer-title {
+#tsf-developer-title,
+#tsf-popup-developer-title {
     user-select: none;
     -webkit-user-select: none;
     touch-action: manipulation;
 }
 
 /* 테마/확장 CSS의 display 선언이 HTML hidden 상태를 다시 드러내지 못하게 한다. */
-.ttotto-nsfw-settings [hidden] {
+.ttotto-sfw-settings [hidden] {
     display: none !important;
 }
 
-.ttotto-nsfw-settings .tns-drawer-header {
+.ttotto-sfw-settings .tsf-drawer-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -22,55 +22,43 @@
 }
 
 /* 팝업에는 전용 상단 제목줄이 있으므로 안쪽 확장 헤더를 중복 표시하지 않는다. */
-.ttotto-nsfw-settings.tns-in-popup .tns-drawer-header {
+.ttotto-sfw-settings.tsf-in-popup .tsf-drawer-header {
     display: none !important;
 }
 
-.ttotto-nsfw-settings .tns-heading {
+.ttotto-sfw-settings .tsf-heading {
     display: flex;
     align-items: center;
     gap: 0.25em;
     min-width: 0;
 }
 
-.ttotto-nsfw-settings .tns-heading > span {
+.ttotto-sfw-settings .tsf-heading > span {
     font-size: 1em;
 }
 
-.ttotto-nsfw-settings .tns-heading small {
+.ttotto-sfw-settings .tsf-heading small {
     display: none;
     opacity: 0.7;
     font-size: 0.78em;
 }
 
-.ttotto-nsfw-settings .tns-header-actions {
+.ttotto-sfw-settings .tsf-header-actions {
     display: flex;
     align-items: center;
     gap: 10px;
     flex-shrink: 0;
 }
 
-.ttotto-nsfw-settings .tns-master-label {
+.ttotto-sfw-settings .tsf-master-label {
     display: none;
     align-items: center;
     gap: 4px;
     margin: 0;
 }
 
-.ttotto-nsfw-settings .tns-adult-warning {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 8px 0;
-    padding: 8px 10px;
-    border-radius: 8px;
-    border: 1px solid color-mix(in srgb, red 45%, transparent);
-    background: color-mix(in srgb, red 12%, transparent);
-    font-size: 0.85em;
-}
-
 /* 모바일에서 버튼 폭이 좁아져 글자가 세로로 쪼개지는 것 방지 */
-.ttotto-nsfw-settings .menu_button {
+.ttotto-sfw-settings .menu_button {
     white-space: nowrap;
     width: auto;
     min-width: fit-content;
@@ -81,20 +69,20 @@
     gap: 4px;
 }
 
-.ttotto-nsfw-settings .tns-tabs {
+.ttotto-sfw-settings .tsf-tabs {
     display: flex;
     gap: 6px;
     margin: 8px 0;
 }
 
-.ttotto-nsfw-settings .tns-tab {
+.ttotto-sfw-settings .tsf-tab {
     flex: 1 1 auto;
     border: 1px solid transparent !important;
     box-shadow: none !important;
     background: transparent !important;
 }
 
-.ttotto-nsfw-settings .tns-tab.is-active {
+.ttotto-sfw-settings .tsf-tab.is-active {
     border: 1px solid color-mix(in srgb, currentColor 20%, transparent) !important;
     background: transparent !important;
     box-shadow: none !important;
@@ -102,38 +90,38 @@
     font-weight: 700;
 }
 
-.ttotto-nsfw-settings .tns-panel {
+.ttotto-sfw-settings .tsf-panel {
     display: flex;
     flex-direction: column;
     gap: 10px;
     padding: 4px 2px 10px;
 }
 
-.ttotto-nsfw-settings .tns-section-head {
+.ttotto-sfw-settings .tsf-section-head {
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
     gap: 8px;
 }
 
-.ttotto-nsfw-settings .tns-section-head small {
+.ttotto-sfw-settings .tsf-section-head small {
     display: block;
     opacity: 0.7;
     font-size: 0.78em;
 }
 
-.ttotto-nsfw-settings .tns-field {
+.ttotto-sfw-settings .tsf-field {
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
 
-.ttotto-nsfw-settings .tns-field small {
+.ttotto-sfw-settings .tsf-field small {
     opacity: 0.65;
     font-size: 0.78em;
 }
 
-.ttotto-nsfw-settings .tns-setting-row {
+.ttotto-sfw-settings .tsf-setting-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -141,19 +129,19 @@
     margin: 0;
 }
 
-.ttotto-nsfw-settings .tns-setting-row small {
+.ttotto-sfw-settings .tsf-setting-row small {
     display: block;
     opacity: 0.65;
     font-size: 0.78em;
 }
 
-.ttotto-nsfw-settings .tns-char-list {
+.ttotto-sfw-settings .tsf-char-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
 }
 
-.ttotto-nsfw-settings .tns-char-row {
+.ttotto-sfw-settings .tsf-char-row {
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -162,7 +150,7 @@
     background: color-mix(in srgb, currentColor 6%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-char-field {
+.ttotto-sfw-settings .tsf-char-field {
     display: grid;
     grid-template-columns: 72px 1fr;
     align-items: center;
@@ -170,33 +158,33 @@
     margin: 0;
 }
 
-.ttotto-nsfw-settings .tns-char-field > span {
+.ttotto-sfw-settings .tsf-char-field > span {
     font-size: 0.8em;
     opacity: 0.75;
 }
 
-.ttotto-nsfw-settings .tns-acts-head {
+.ttotto-sfw-settings .tsf-acts-head {
     margin-top: 4px;
 }
 
-.ttotto-nsfw-settings #tns-next-section .tns-section-head {
+.ttotto-sfw-settings #tsf-next-section .tsf-section-head {
     margin-bottom: 8px;
 }
 
-.ttotto-nsfw-settings .tns-dialogue-section {
+.ttotto-sfw-settings .tsf-dialogue-section {
     display: flex;
     flex-direction: column;
     gap: 8px;
     margin-top: 4px;
 }
 
-.ttotto-nsfw-settings .tns-acts-list {
+.ttotto-sfw-settings .tsf-acts-list {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
 }
 
-.ttotto-nsfw-settings .tns-heat {
+.ttotto-sfw-settings .tsf-heat {
     display: inline-block;
     margin-left: 6px;
     padding: 1px 8px;
@@ -206,12 +194,12 @@
     background: color-mix(in srgb, currentColor 8%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-heat.is-hot {
+.ttotto-sfw-settings .tsf-heat.is-hot {
     background: color-mix(in srgb, crimson 22%, transparent);
     border: 1px solid color-mix(in srgb, crimson 45%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-act-chip {
+.ttotto-sfw-settings .tsf-act-chip {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -222,7 +210,7 @@
     border: 1px solid color-mix(in srgb, crimson 40%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-act-chip button {
+.ttotto-sfw-settings .tsf-act-chip button {
     border: none;
     background: none;
     color: inherit;
@@ -233,47 +221,21 @@
     opacity: 0.7;
 }
 
-.ttotto-nsfw-settings .tns-act-chip button:hover {
+.ttotto-sfw-settings .tsf-act-chip button:hover {
     opacity: 1;
 }
 
-.ttotto-nsfw-settings .tns-act-chip.tns-next-chip {
+.ttotto-sfw-settings .tsf-act-chip.tsf-next-chip {
     background: color-mix(in srgb, royalblue 16%, transparent);
     border: 1px solid color-mix(in srgb, royalblue 38%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-act-chip.tns-custom-chip {
+.ttotto-sfw-settings .tsf-act-chip.tsf-custom-chip {
     background: transparent;
     border: 1px dashed color-mix(in srgb, crimson 55%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-act-chip.tns-hit-chip {
-    background: color-mix(in srgb, currentColor 7%, transparent);
-    border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-    font-size: 0.76em;
-}
-
-.ttotto-nsfw-settings .tns-score-box {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px;
-    border-radius: 8px;
-    background: color-mix(in srgb, currentColor 5%, transparent);
-}
-
-.ttotto-nsfw-settings .tns-score-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-
-.ttotto-nsfw-settings .tns-score-box small {
-    opacity: 0.65;
-    font-size: 0.78em;
-}
-
-.ttotto-nsfw-settings .tns-slow-burn-card {
+.ttotto-sfw-settings .tsf-slow-burn-card {
     display: flex;
     flex-direction: column;
     gap: 7px;
@@ -283,18 +245,18 @@
     border: 1px solid color-mix(in srgb, #f4a261 18%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-card[hidden] {
+.ttotto-sfw-settings .tsf-slow-burn-card[hidden] {
     display: none;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-card > small,
-.ttotto-nsfw-settings .tns-slow-burn-head small {
+.ttotto-sfw-settings .tsf-slow-burn-card > small,
+.ttotto-sfw-settings .tsf-slow-burn-head small {
     display: block;
     opacity: 0.68;
     font-size: 0.78em;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-target-box {
+.ttotto-sfw-settings .tsf-slow-burn-target-box {
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -304,69 +266,69 @@
     border: 1px solid color-mix(in srgb, #f4a261 16%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-target-box > small {
+.ttotto-sfw-settings .tsf-slow-burn-target-box > small {
     opacity: 0.72;
     font-size: 0.78em;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-target-row {
+.ttotto-sfw-settings .tsf-slow-burn-target-row {
     display: flex;
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-target-row label {
+.ttotto-sfw-settings .tsf-slow-burn-target-row label {
     display: inline-flex;
     align-items: center;
     gap: 5px;
     margin: 0;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-target-row input {
+.ttotto-sfw-settings .tsf-slow-burn-target-row input {
     width: 64px;
     min-width: 64px;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-target-box.is-active {
+.ttotto-sfw-settings .tsf-slow-burn-target-box.is-active {
     border-color: color-mix(in srgb, #f4a261 34%, transparent);
     box-shadow: 0 0 0 1px color-mix(in srgb, #f4a261 8%, transparent) inset;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-head {
+.ttotto-sfw-settings .tsf-slow-burn-head {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 8px;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-stage {
+.ttotto-sfw-settings .tsf-slow-burn-stage {
     font-weight: 500;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-controls {
+.ttotto-sfw-settings .tsf-slow-burn-controls {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
 }
 
-.ttotto-nsfw-settings .tns-slow-burn-controls .menu_button {
+.ttotto-sfw-settings .tsf-slow-burn-controls .menu_button {
     width: 100%;
     min-width: 0;
 }
 
-.ttotto-nsfw-settings .tns-custom-ban-row {
+.ttotto-sfw-settings .tsf-custom-ban-row {
     display: flex;
     gap: 6px;
     align-items: center;
 }
 
-.ttotto-nsfw-settings .tns-custom-ban-row input {
+.ttotto-sfw-settings .tsf-custom-ban-row input {
     flex: 1 1 auto;
     min-width: 0;
 }
 
-.ttotto-nsfw-settings .tns-empty {
+.ttotto-sfw-settings .tsf-empty {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -377,21 +339,21 @@
     background: color-mix(in srgb, currentColor 5%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-prompt-preview {
+.ttotto-sfw-settings .tsf-prompt-preview {
     margin: 4px 0 10px;
     border-radius: 8px;
     padding: 8px;
     background: color-mix(in srgb, currentColor 6%, transparent);
 }
 
-.ttotto-nsfw-settings .tns-preview-head {
+.ttotto-sfw-settings .tsf-preview-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     margin-bottom: 4px;
 }
 
-.ttotto-nsfw-settings .tns-prompt-preview pre {
+.ttotto-sfw-settings .tsf-prompt-preview pre {
     margin: 0;
     max-height: 240px;
     overflow: auto;
@@ -400,13 +362,13 @@
     font-size: 0.78em;
 }
 
-.ttotto-nsfw-settings .tns-count {
+.ttotto-sfw-settings .tsf-count {
     opacity: 0.7;
     font-size: 0.8em;
 }
 
 /* ── 완드 메뉴 팝업 ── */
-.tns-overlay {
+.tsf-overlay {
     display: none;
     position: fixed !important;
     top: 0 !important;
@@ -427,11 +389,11 @@
     -webkit-transform: none !important;
 }
 
-.tns-overlay.open {
+.tsf-overlay.open {
     display: flex !important;
 }
 
-.tns-popup {
+.tsf-popup {
     width: 100%;
     max-width: 460px;
     max-height: 88vh;
@@ -447,7 +409,7 @@
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
 }
 
-.tns-popup-header {
+.tsf-popup-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -457,32 +419,32 @@
     flex-shrink: 0;
 }
 
-.tns-popup-body {
+.tsf-popup-body {
     overflow-y: auto;
     padding: 8px 14px 14px;
 }
 
 /* 팝업 안에서는 드로어를 항상 펼침 */
-.tns-in-popup .inline-drawer-content {
+.tsf-in-popup .inline-drawer-content {
     display: block !important;
 }
 
-.ttotto-nsfw-settings .tns-button-row {
+.ttotto-sfw-settings .tsf-button-row {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
 }
 
-.ttotto-nsfw-settings .tns-button-row .menu_button {
+.ttotto-sfw-settings .tsf-button-row .menu_button {
     flex: 1 1 auto;
 }
 
-.ttotto-nsfw-settings .tns-section-head .menu_button {
+.ttotto-sfw-settings .tsf-section-head .menu_button {
     flex-shrink: 0;
 }
 
 /* ── CardInject 연동 ── */
-.ttotto-nsfw-settings .tns-card-link-box {
+.ttotto-sfw-settings .tsf-card-link-box {
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -492,11 +454,11 @@
     border-radius: 8px;
 }
 
-.ttotto-nsfw-settings .tns-card-link-box > small {
+.ttotto-sfw-settings .tsf-card-link-box > small {
     opacity: 0.8;
     line-height: 1.45;
 }
 
-.ttotto-nsfw-settings .tns-card-link-row {
+.ttotto-sfw-settings .tsf-card-link-row {
     margin: 0;
 }
