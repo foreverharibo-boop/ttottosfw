@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.4';
+const EXTENSION_VERSION = '0.2.5';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -164,9 +164,13 @@ const NSFW_LOCAL_THRESHOLDS = Object.freeze({ high: 4, normal: 6, low: 9 });
 const NSFW_COLD_STREAK = 3;
 const NSFW_STATE_TAG_REGEX = /<scene_state\b[^>]*>[\s\S]*?<\/scene_state>/gi;
 const NSFW_LEXICON = Object.freeze([
-    { re: /삽입|절정|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|안에\s*들어오|안을\s*채우|몸\s*안에|하나가\s*되|thrust(?:ing|s)?|orgasm|climax|cock|pussy|nipple|entrance|inside\s+her|inside\s+him/gi, weight: 3 },
-    { re: /하앙|흐응|아앙|으응|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, weight: 3 },
-    { re: /벗기|벗겨|탈의|알몸|나체|속옷|브래지어|팬티|지퍼를\s*내리|단추를\s*풀|신음|헐떡|핥|빨아|깨물|침대에\s*눕히|다리\s*사이|허벅지\s*안쪽|가슴을\s*움켜|가슴을\s*쓸|몸을\s*겹치|밀어\s*넘어뜨리|undress|strip(?:ped|ping)?|naked|underwear|lick(?:ed|ing|s)?|suck(?:ed|ing|s)?|grind(?:ed|ing|s)?|straddl(?:e|ed|ing)|between\s+(?:her|his)\s+thighs/gi, weight: 2 },
+    // 단독으로 일상 문맥에서도 흔한 entrance/climax 등은 넣지 않는다.
+    // 영어의 strip/suck/naked 같은 다의어도 아래에서 성적 문맥으로 한정한다.
+    { re: /삽입|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|성적\s*절정|thrust(?:ing|s)?|orgasm|cock|pussy|nipples?|inside\s+her|inside\s+him|sexual\s+climax/gi, weight: 3 },
+    { re: /하앙|아앙|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?\s+(?:with\s+pleasure|her\s+name|his\s+name)|whimper(?:ed|ing)?\s+(?:with\s+pleasure|for\s+more)/gi, weight: 3 },
+    { re: /벗기|벗겨|탈의|알몸|나체|속옷|브래지어|팬티|지퍼를\s*내리|단추를\s*풀|침대에\s*눕히|다리\s*사이|허벅지\s*안쪽|가슴을\s*움켜|가슴을\s*쓸|undress(?:ed|ing)?\s+(?:her|him|them|himself|herself|themselves)|strip(?:ped|ping)?\s+(?:off|down|naked|her|him|them|their|his|clothes?|shirt|dress|pants|underwear)|\bnaked\b(?!\s+eyes?\b)|underwear|lick(?:ed|ing|s)?\s+(?:her|his|their|the)?\s*(?:neck|chest|breasts?|nipples?|thighs?|clit|pussy|cock|dick)|suck(?:ed|ing|s)?\s+(?:on\s+)?(?:her|his|their|the)?\s*(?:breasts?|nipples?|fingers?|clit|pussy|cock|dick)|grind(?:ed|ing|s)?\s+(?:against|on|into)|straddl(?:e|ed|ing)\s+(?:her|him|them|his|their)|between\s+(?:her|his)\s+thighs/gi, weight: 2 },
+    // 통증·공포·격한 운동에서도 나올 수 있는 신호는 단독으로 중단 기준에 도달하지 않는다.
+    { re: /신음|헐떡|핥|빨아|깨물|몸을\s*겹치|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, weight: 1 },
     { re: /키스가\s*깊어|입술을\s*탐|혀가\s*얽|숨이\s*가빠|숨이\s*거칠|달아오|몸이\s*뜨거|열기가\s*번지|목덜미에\s*입|귓불을|허리를\s*끌어당|kiss\s+deepen|breath(?:ing)?\s+(?:hitch|ragged|heavy)|heat\s+pool|shiver(?:ed|ing)?\s+under/gi, weight: 1 },
 ]);
 
@@ -467,10 +471,12 @@ function stripDetectorTags(text) {
 function localNsfwScore(text) {
     const source = stripDetectorTags(text);
     let score = 0;
+    let matchedGroups = 0;
     for (const { re, weight } of NSFW_LEXICON) {
         re.lastIndex = 0;
         let count = 0;
         while (count < 3 && re.exec(source) !== null) count++;
+        if (count) matchedGroups++;
         score += count * weight;
     }
     const nsfwSettings = getContext().extensionSettings?.[NSFW_SETTINGS_KEY];
@@ -481,9 +487,14 @@ function localNsfwScore(text) {
             .filter(Boolean);
         const lowerSource = source.toLocaleLowerCase();
         for (const keyword of customKeywords) {
-            if (lowerSource.includes(keyword.toLocaleLowerCase())) score += 3;
+            if (lowerSource.includes(keyword.toLocaleLowerCase())) {
+                score += 3;
+                matchedGroups++;
+            }
         }
     }
+    // 약한 단서 하나가 여러 번 반복된 것과 서로 다른 성적 단서가 겹친 것을 구분한다.
+    if (matchedGroups >= 2 && score >= 3) score += 3;
     return score;
 }
 
@@ -893,13 +904,16 @@ function actMatchesPlainBan(act, ban) {
 function recentActs(windowSize) {
     if (!getSettings().repeatGuard) return [];
     const ignored = ignoredActSet();
-    const messages = assistantMessages();
+    // 먼저 최근 AI 답변 N개로 범위를 고정한다. 태그가 누락된 답변이 있어도
+    // 더 오래된 메시지까지 거슬러 올라가 반복 금지 대상으로 삼지 않는다.
+    const limit = Math.max(1, Number(windowSize) || DEFAULT_SETTINGS.repeatWindow);
+    const messages = assistantMessages().slice(-limit);
     const rows = [];
-    for (let i = messages.length - 1; i >= 0 && rows.length < windowSize; i--) {
+    for (let i = 0; i < messages.length; i++) {
         const snapshot = snapshotForMessage(messages[i]);
         if (!snapshot?.state?.acts?.length) continue;
         const acts = snapshot.state.acts.filter((act) => !isActIgnored(act, ignored));
-        if (acts.length) rows.unshift({ turnsAgo: rows.length + 1, acts });
+        if (acts.length) rows.push({ turnsAgo: messages.length - i, acts });
     }
     // 중복 제거 (같은 전개가 여러 턴에 반복 기록된 경우 최신 것만)
     const seenActs = [];
@@ -1724,11 +1738,12 @@ function scheduleAutoRefine() {
 
 // ───────────────────────── 메시지 이벤트 처리 ─────────────────────────
 
-function messageByIndex(index) {
+function messageEntryByIndex(index) {
     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
     const numeric = Number(index);
-    if (Number.isInteger(numeric) && chat[numeric]) return chat[numeric];
-    return chat.length ? chat[chat.length - 1] : null;
+    if (Number.isInteger(numeric) && chat[numeric]) return { index: numeric, message: chat[numeric] };
+    const fallbackIndex = chat.length - 1;
+    return fallbackIndex >= 0 ? { index: fallbackIndex, message: chat[fallbackIndex] } : null;
 }
 
 function rerenderMessage(index, message) {
@@ -1756,7 +1771,8 @@ function handleIncomingMessage(index) {
     const meta = getChatMeta(false);
     if (!meta?.enabled) return;
 
-    const message = messageByIndex(index);
+    const entry = messageEntryByIndex(index);
+    const message = entry?.message;
     if (!message || message.is_system) return;
     if (message.is_user) {
         syncNsfwSuspension({ notify: true });
@@ -1773,7 +1789,7 @@ function handleIncomingMessage(index) {
         saveChatMeta();
     }
     if (changed) {
-        rerenderMessage(index, message);
+        rerenderMessage(entry.index, message);
         persistChat();
     }
     if (suspended) {
@@ -2791,6 +2807,8 @@ function registerEvents() {
     // 스와이프 보험: ST 버전에 따라 스와이프 생성 후 MESSAGE_RECEIVED가 안 오는 경우를 이중으로 잡는다
     listen('GENERATION_ENDED', () => handleIncomingMessage());
     listen('MESSAGE_SWIPED', (index) => handleIncomingMessage(index));
+    // 편집된 본문만으로 제거된 상태 태그를 재구성할 수 없으므로 기존 스냅샷은 유지한다.
+    // 편집 이벤트에서 보조 AI를 자동 호출하지 않아 확장의 기본 동작을 가볍게 유지한다.
     listen('MESSAGE_EDITED', () => updateUi());
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
