@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.0';
+const EXTENSION_VERSION = '0.2.1';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -151,6 +151,21 @@ const BRIDGE_LINES = [
 const SAFETY_LIMIT = 1000000;
 
 const INTENSITY_HIGH = 5;
+
+// NSFW 장면 자동 인계: 또또NSFW가 실제 개입 중이면 그 상태를 우선하고,
+// 설치되어 있지 않아도 같은 로컬 신호 감지기로 SFW 주입을 잠시 멈춘다.
+const NSFW_SETTINGS_KEY = 'ttotto-nsfw';
+const NSFW_CHAT_STATE_KEY = 'ttottoNsfw';
+const NSFW_LOCAL_WINDOW = 4;
+const NSFW_LOCAL_THRESHOLDS = Object.freeze({ high: 4, normal: 6, low: 9 });
+const NSFW_COLD_STREAK = 3;
+const NSFW_STATE_TAG_REGEX = /<scene_state\b[^>]*>[\s\S]*?<\/scene_state>/gi;
+const NSFW_LEXICON = Object.freeze([
+    { re: /삽입|절정|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|안에\s*들어오|안을\s*채우|몸\s*안에|하나가\s*되|thrust(?:ing|s)?|orgasm|climax|cock|pussy|nipple|entrance|inside\s+her|inside\s+him/gi, weight: 3 },
+    { re: /하앙|흐응|아앙|으응|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, weight: 3 },
+    { re: /벗기|벗겨|탈의|알몸|나체|속옷|브래지어|팬티|지퍼를\s*내리|단추를\s*풀|신음|헐떡|핥|빨아|깨물|침대에\s*눕히|다리\s*사이|허벅지\s*안쪽|가슴을\s*움켜|가슴을\s*쓸|몸을\s*겹치|밀어\s*넘어뜨리|undress|strip(?:ped|ping)?|naked|underwear|lick(?:ed|ing|s)?|suck(?:ed|ing|s)?|grind(?:ed|ing|s)?|straddl(?:e|ed|ing)|between\s+(?:her|his)\s+thighs/gi, weight: 2 },
+    { re: /키스가\s*깊어|입술을\s*탐|혀가\s*얽|숨이\s*가빠|숨이\s*거칠|달아오|몸이\s*뜨거|열기가\s*번지|목덜미에\s*입|귓불을|허리를\s*끌어당|kiss\s+deepen|breath(?:ing)?\s+(?:hitch|ragged|heavy)|heat\s+pool|shiver(?:ed|ing)?\s+under/gi, weight: 1 },
+]);
 
 const REFINE_MESSAGE_CHAR_LIMIT = 12000;
 const REFINE_TOTAL_CHAR_LIMIT = 60000;
@@ -324,6 +339,10 @@ function getChatMeta(create = true) {
             slowBurnTargetActive: false,
             slowBurnTargetCompleted: false,
             ignoredDialogueBeats: [],
+            nsfwSuspended: false,
+            nsfwResumePending: false,
+            nsfwDelegatedAtAssistantCount: null,
+            nsfwDetectionCooldownFrom: 0,
         };
     }
     const meta = context.chatMetadata[CHAT_STATE_KEY];
@@ -335,6 +354,14 @@ function getChatMeta(create = true) {
     meta.slowBurnTargetTurns = clampSlowBurnTargetTurns(meta.slowBurnTargetTurns);
     meta.slowBurnTargetActive = Boolean(meta.slowBurnTargetActive && meta.slowBurnTarget);
     meta.slowBurnTargetCompleted = Boolean(meta.slowBurnTargetCompleted && meta.slowBurnTarget);
+    meta.nsfwSuspended = Boolean(meta.nsfwSuspended);
+    meta.nsfwResumePending = Boolean(meta.nsfwResumePending);
+    const delegatedAt = meta.nsfwDelegatedAtAssistantCount === null || meta.nsfwDelegatedAtAssistantCount === undefined
+        ? NaN
+        : Number(meta.nsfwDelegatedAtAssistantCount);
+    meta.nsfwDelegatedAtAssistantCount = Number.isInteger(delegatedAt) && delegatedAt >= 0 ? delegatedAt : null;
+    const cooldownFrom = Number(meta.nsfwDetectionCooldownFrom);
+    meta.nsfwDetectionCooldownFrom = Number.isInteger(cooldownFrom) && cooldownFrom >= 0 ? cooldownFrom : 0;
     return meta;
 }
 
@@ -353,7 +380,115 @@ function isSupervising() {
 
 // 개입 중: 연속성·반복금지·진행 지시까지 전부 주입하는 상태
 function isFullyArmed() {
-    return isSupervising();
+    return Boolean(isSupervising() && !getChatMeta(false)?.nsfwSuspended);
+}
+
+// ───────────────────────── NSFW 장면 자동 인계 ─────────────────────────
+
+function nsfwExtensionOwnsScene() {
+    const context = getContext();
+    const settings = context.extensionSettings?.[NSFW_SETTINGS_KEY];
+    const meta = context.chatMetadata?.[NSFW_CHAT_STATE_KEY];
+    if (!settings?.enabled || !meta?.enabled) return false;
+    // 자동 모드에서는 무장 중이거나 해제 브릿지가 남아 있는 동안까지 NSFW판이 담당한다.
+    if (settings.armMode !== 'manual') return Boolean(meta.autoArmed || meta.bridgePending);
+    return true;
+}
+
+function stripDetectorTags(text) {
+    return stripStateTag(String(text ?? ''))
+        .replace(NSFW_STATE_TAG_REGEX, '')
+        .replace(/<scene_state\b[^>]*>[\s\S]*$/gi, '');
+}
+
+function localNsfwScore(text) {
+    const source = stripDetectorTags(text);
+    let score = 0;
+    for (const { re, weight } of NSFW_LEXICON) {
+        re.lastIndex = 0;
+        let count = 0;
+        while (count < 3 && re.exec(source) !== null) count++;
+        score += count * weight;
+    }
+    const nsfwSettings = getContext().extensionSettings?.[NSFW_SETTINGS_KEY];
+    if (nsfwSettings?.enabled) {
+        const customKeywords = String(nsfwSettings.stealthKeywords ?? '')
+            .split(',')
+            .map((keyword) => keyword.trim())
+            .filter(Boolean);
+        const lowerSource = source.toLocaleLowerCase();
+        for (const keyword of customKeywords) {
+            if (lowerSource.includes(keyword.toLocaleLowerCase())) score += 3;
+        }
+    }
+    return score;
+}
+
+function localNsfwThreshold() {
+    const nsfwSettings = getContext().extensionSettings?.[NSFW_SETTINGS_KEY];
+    const sensitivity = nsfwSettings?.enabled ? String(nsfwSettings.stealthSensitivity ?? 'normal') : 'normal';
+    return NSFW_LOCAL_THRESHOLDS[sensitivity] ?? NSFW_LOCAL_THRESHOLDS.normal;
+}
+
+function recentConversationMessages(limit) {
+    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+    return chat.filter((message) => message && !message.is_system).slice(-limit);
+}
+
+function localNsfwWindowScore() {
+    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+    const storedFrom = Number(getChatMeta(false)?.nsfwDetectionCooldownFrom ?? 0);
+    const from = Number.isInteger(storedFrom) && storedFrom >= 0 && storedFrom <= chat.length ? storedFrom : 0;
+    return chat
+        .map((message, index) => ({ message, index }))
+        .filter(({ message, index }) => message && !message.is_system && index >= from)
+        .slice(-NSFW_LOCAL_WINDOW)
+        .reduce((total, { message }) => total + localNsfwScore(message.mes), 0);
+}
+
+function localNsfwColdStreak() {
+    const recent = recentConversationMessages(NSFW_COLD_STREAK);
+    return recent.length >= NSFW_COLD_STREAK
+        && recent.every((message) => localNsfwScore(message.mes) === 0);
+}
+
+function syncNsfwSuspension({ notify = false } = {}) {
+    const meta = getChatMeta(false);
+    if (!meta?.enabled) return false;
+
+    const delegated = nsfwExtensionOwnsScene();
+    const assistantCount = assistantMessages().length;
+    if (delegated && meta.nsfwDelegatedAtAssistantCount !== assistantCount) {
+        meta.nsfwDelegatedAtAssistantCount = assistantCount;
+        saveChatMeta();
+    }
+    // NSFW판의 마지막 브릿지 생성과 SFW 복귀 주입이 같은 요청에 겹치지 않도록,
+    // NSFW판이 마지막으로 담당한 뒤 AI 응답 하나가 추가될 때까지 인계를 유지한다.
+    const delegationDraining = meta.nsfwSuspended
+        && !delegated
+        && Number.isInteger(meta.nsfwDelegatedAtAssistantCount)
+        && assistantCount <= meta.nsfwDelegatedAtAssistantCount;
+    const detected = localNsfwWindowScore() >= localNsfwThreshold();
+    const shouldSuspend = delegated || delegationDraining || (meta.nsfwSuspended ? !localNsfwColdStreak() : detected);
+
+    if (shouldSuspend && !meta.nsfwSuspended) {
+        meta.nsfwSuspended = true;
+        meta.nsfwResumePending = false;
+        meta.bridgePending = false;
+        resetSlowBurnSession(meta);
+        saveChatMeta();
+        clearInjectedPrompt();
+        if (notify) toastr.info('NSFW 장면을 감지해 또또SFW는 잠시 대기해요.', '🫧또또SFW');
+    } else if (!shouldSuspend && meta.nsfwSuspended) {
+        meta.nsfwSuspended = false;
+        meta.nsfwResumePending = true;
+        meta.nsfwDelegatedAtAssistantCount = null;
+        meta.nsfwDetectionCooldownFrom = Array.isArray(getContext().chat) ? getContext().chat.length : 0;
+        meta.manualState = null;
+        saveChatMeta();
+        if (notify) toastr.info('장면이 잦아들어 또또SFW가 다시 개입해요.', '🫧또또SFW');
+    }
+    return Boolean(meta.nsfwSuspended);
 }
 
 // ───────────────────────── 개입 시작/해제 ─────────────────────────
@@ -370,9 +505,14 @@ function forceToggleArm() {
     meta.enabled = !wasEnabled;
     if (!meta.enabled) {
         meta.bridgePending = Boolean(settings.exitBridge);
+        meta.nsfwSuspended = false;
+        meta.nsfwResumePending = false;
+        meta.nsfwDelegatedAtAssistantCount = null;
+        meta.nsfwDetectionCooldownFrom = 0;
         resetSlowBurnSession(meta);
     } else {
         meta.bridgePending = false;
+        syncNsfwSuspension();
     }
     saveChatMeta();
     if (meta.enabled && settings.slowBurnEnabled) startSlowBurnSessionIfNeeded();
@@ -597,6 +737,9 @@ function assistantMessages() {
 // 유효한 현재 상태: 수동 보정이 최신이면 그것을, 아니면 마지막 스냅샷을 사용.
 function effectiveState() {
     const meta = getChatMeta(false);
+    // NSFW 구간을 건너뛴 직후에는 이전 SFW 스냅샷을 현재 상태로 오인하지 않는다.
+    // 첫 복귀 응답에서 새 전체 상태를 받으면 이 플래그가 해제된다.
+    if (meta?.nsfwResumePending) return { state: null, source: 'nsfw-resume' };
     const messages = assistantMessages();
     let lastSnapshot = null;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -1170,6 +1313,9 @@ function stateReportLines(settings, nextGuidance = '') {
 
 function buildInjection() {
     const settings = getSettings();
+    const meta = getChatMeta(false);
+    if (meta?.nsfwSuspended) return '';
+    const resuming = Boolean(meta?.nsfwResumePending);
     const { state } = effectiveState();
     const targetActive = slowBurnTargetProgress().active;
     const dialogueGuard = Boolean(settings.dialogueBeatGuard);
@@ -1181,7 +1327,7 @@ function buildInjection() {
         return parts.join('\n');
     }
 
-    const actRows = recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow);
+    const actRows = resuming ? [] : recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow);
     const pace = resolvePace(settings, state);
 
     const sections = ['[Scene Continuity Directive]'];
@@ -1234,7 +1380,7 @@ function buildInjection() {
     }
 
     if (dialogueGuard) {
-        const dialogueRows = recentDialogueBeats();
+        const dialogueRows = resuming ? [] : recentDialogueBeats();
         if (dialogueRows.length) {
             sections.push(
                 '',
@@ -1250,7 +1396,7 @@ function buildInjection() {
     if (settings.nextBeatHints && !targetActive) {
         const preferenceLines = buildCardPreferenceLines();
         if (preferenceLines.length) sections.push('', ...preferenceLines);
-        const beats = nextBeatCandidates();
+        const beats = resuming ? [] : nextBeatCandidates();
         if (beats.length) {
             sections.push(
                 '',
@@ -1294,6 +1440,10 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
         if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) return;
         const settings = getSettings();
         const meta = getChatMeta(false);
+        if (isSupervising() && syncNsfwSuspension()) {
+            console.debug(`${LOG_PREFIX} NSFW 장면 자동 인계 — SFW 주입 생략`);
+            return;
+        }
         // 채팅 토글로 수동 해제한 뒤에는 감시 자체가 꺼져도 다음 생성 한 번의 브릿지만 통과시킨다.
         const bridgeOnly = Boolean(
             runtimeActive
@@ -1454,6 +1604,10 @@ function parseRefineResponse(text) {
 async function runRefine({ manual = false } = {}) {
     const settings = getSettings();
     if (!runtimeActive || refineRunning) return false;
+    if (getChatMeta(false)?.nsfwSuspended) {
+        if (manual) toastr.info('NSFW 장면을 다른 확장에 인계한 동안에는 SFW 보정을 쉬어요.', '🫧또또SFW');
+        return false;
+    }
     if (assistantMessages().length < 1) {
         if (manual) toastr.info('분석할 AI 응답이 아직 없어요.', '🫧또또SFW');
         return false;
@@ -1477,6 +1631,7 @@ async function runRefine({ manual = false } = {}) {
             persistChat();
         }
         meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
+        meta.nsfwResumePending = false;
         saveChatMeta();
         if (manual) toastr.success('보조 AI가 장면 상태를 다시 잡았어요.', '🫧또또SFW');
         return true;
@@ -1535,13 +1690,28 @@ function handleIncomingMessage(index) {
     if (!meta?.enabled) return;
 
     const message = messageByIndex(index);
-    if (!message || message.is_user || message.is_system) return;
+    if (!message || message.is_system) return;
+    if (message.is_user) {
+        syncNsfwSuspension({ notify: true });
+        updateUi();
+        return;
+    }
 
     const { changed, found, state } = harvestMessage(message);
+    const suspended = syncNsfwSuspension({ notify: true });
     if (found) {
         // 새 스냅샷이 수동 보정보다 최신이므로 수동 보정은 자연히 밀려남
         if (meta.manualState && Number(meta.manualState.at ?? 0) < Date.now()) meta.manualState = null;
+        if (!suspended) meta.nsfwResumePending = false;
         saveChatMeta();
+    }
+    if (changed) {
+        rerenderMessage(index, message);
+        persistChat();
+    }
+    if (suspended) {
+        updateUi();
+        return;
     }
     const targetProgress = slowBurnTargetProgress();
     if (targetProgress.active && targetProgress.completedTurns >= targetProgress.requiredTurns) {
@@ -1550,10 +1720,6 @@ function handleIncomingMessage(index) {
         meta.slowBurnRecoveryPending = false;
         saveChatMeta();
         toastr.success(`“${targetProgress.target}” ${targetProgress.requiredTurns}회 진행을 채웠어요. 다음 AI 답변부터는 전환할 수 있어요.`, '🫧또또SFW');
-    }
-    if (changed) {
-        rerenderMessage(index, message);
-        persistChat();
     }
     const completenessState = state ?? snapshotForMessage(message)?.state ?? null;
     const completenessIssues = found ? stateCompletenessIssues(completenessState, settings) : [];
@@ -2039,6 +2205,8 @@ function updateUi() {
     try {
         const settings = getSettings();
         const meta = getChatMeta(false);
+        if (meta?.enabled) syncNsfwSuspension();
+        const nsfwSuspended = Boolean(meta?.nsfwSuspended);
 
         element('tsf-enabled').checked = Boolean(settings.enabled);
         element('tsf-chat-enabled').checked = Boolean(meta?.enabled);
@@ -2077,12 +2245,14 @@ function updateUi() {
             ? '꺼져 있어요'
             : !meta?.enabled
                 ? '이 채팅에서는 쉬는 중'
+                : nsfwSuspended
+                    ? 'NSFW 장면이라 자동 대기 중이에요'
                 : refineRunning
                     ? '보조 AI 분석 중…'
                     : '장면을 지켜보는 중이에요';
 
-        element('tsf-refine').disabled = refineRunning;
-        element('tsf-force-arm-label').textContent = isFullyArmed() ? '개입 해제' : '지금 개입';
+        element('tsf-refine').disabled = refineRunning || nsfwSuspended;
+        element('tsf-force-arm-label').textContent = isSupervising() ? '개입 해제' : '지금 개입';
         renderStatePanel();
 
         const preview = element('tsf-prompt-preview');
@@ -2210,8 +2380,13 @@ function bindUi() {
         if (wasEnabled && !meta.enabled) {
             meta.bridgePending = Boolean(getSettings().exitBridge);
             meta.autoArmed = false;
+            meta.nsfwSuspended = false;
+            meta.nsfwResumePending = false;
+            meta.nsfwDelegatedAtAssistantCount = null;
+            meta.nsfwDetectionCooldownFrom = 0;
         } else if (meta.enabled) {
             meta.bridgePending = false;
+            syncNsfwSuspension();
         }
         resetSlowBurnSession(meta);
         saveChatMeta();
