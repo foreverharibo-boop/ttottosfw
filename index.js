@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.3';
+const EXTENSION_VERSION = '0.2.4';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -1091,11 +1091,13 @@ function nextBeatCandidates() {
         ...(getChatMeta(false)?.customBans ?? []),
         ...(getSettings().globalBans ?? []),
     ].map(String).filter(Boolean);
+    const newFacts = state.dialogueFlow?.newFacts ?? [];
     const accepted = [];
     for (const beat of state.next) {
         if (isActIgnored(beat, ignored)) continue;
         if (customBans.some((ban) => actMatchesPlainBan(beat, ban))) continue;
         if (bannedActs.some((act) => actsAreSimilar(beat, act))) continue;
+        if (newFacts.some((fact) => actsAreSimilar(beat, fact))) continue;
         if (accepted.some((candidate) => actsAreSimilar(beat, candidate))) continue;
         accepted.push(beat);
     }
@@ -1366,7 +1368,7 @@ function stateReportLines(settings, nextGuidance = '') {
     if (settings.slowBurnEnabled) {
         lines.push('"stage" is the progression stage for the reported "scene_type", as an integer from 1 to 6. Judge it using that genre\'s stage meaning from the slow-burn directive.');
     }
-    if (settings.nextBeatHints) lines.push('"next" must not repeat anything from "acts" and must fit the current scene type, continuity, and stage.');
+    if (settings.nextBeatHints) lines.push('"next" must contain future developments that follow naturally from the current topic, any unanswered direct question, and "dialogue_flow.new_facts". It must not repeat, paraphrase, summarize, or reenact anything already listed in "acts" or "dialogue_flow.new_facts", and must fit the current scene type, continuity, and stage.');
     if (nextGuidance) lines.push(nextGuidance);
     lines.push(
         'The optional top-level "_status" field is the ONLY place for a change acknowledgement: use "no_change" there if needed; otherwise use "updated". All real state fields must still repeat their complete current values.',
@@ -1416,7 +1418,7 @@ function buildInjection() {
     if (settings.dialogueFlow && state?.dialogueFlow) {
         sections.push(
             '',
-            'DIALOGUE CONTINUITY: Stay with the current conversational topic unless the USER changes or resolves it. Address the most recent direct question naturally when it is still relevant, but treat it as resolved if the USER message already answered or superseded it. Preserve newly established facts and do not make characters forget what was just learned.',
+            'DIALOGUE CONTINUITY: Stay with the current conversational topic unless the USER changes or resolves it. Address the most recent direct question naturally when it is still relevant, but treat it as resolved if the USER message already answered or superseded it. Treat newly established facts as grounding for what happens next: build forward from them naturally instead of merely restating them or making characters forget what was just learned.',
         );
     }
 
@@ -1465,6 +1467,7 @@ function buildInjection() {
             sections.push(
                 '',
                 `SUGGESTED NEXT BEATS (pick one, or do something even better — never fall back to a banned beat): ${beats.map((beat) => biText(beat, 'en')).join(' / ')}`,
+                'Choose by considering the current topic, any still-unanswered direct question, and the newly established facts together. Use the candidate that follows most naturally from that context, or create a better continuation. A candidate is a future possibility, not an established fact: do not simply repeat, summarize, or reenact a newly established fact.',
             );
             if (settings.slowBurnEnabled) sections.push('These suggestions are subordinate to the mandatory slow-burn stage cap and no-conclusion lock. Ignore any suggestion that would skip, finish, or wind down the scene too early.');
         }
@@ -1603,7 +1606,7 @@ Rules:
 - Keep the established scene type unless the dominant kind of scene genuinely changes; incidental dialogue or a small action alone is not a type change.
 - Track only important objects whose location or condition matters for scene continuity; do not inventory ordinary background items.
 ${settings.repeatGuard ? '- "acts" must cover only substantive new developments in the final CHARACTER message. Skip routine logistics and tiny housekeeping actions.\n' : ''}${settings.dialogueBeatGuard ? '- "dialogue_beats" must list 0-3 conversational intents/functions from spoken CHARACTER dialogue in the final CHARACTER message only. Describe purpose, not wording. Use [] if there is no spoken dialogue.\n' : ''}${settings.dialogueFlow ? '- "dialogue_flow" tracks only the current topic, the latest direct CHARACTER question still awaiting an answer, and facts newly established in the final CHARACTER message. Do not create an unresolved plot, promise, goal, or clue list.\n' : ''}${INTENSITY_SCALE_LINES.join('\n')}
-${settings.slowBurnEnabled ? '- "stage" is an integer 1-6 using the reported scene type: setup, engagement, first meaningful development, deepening/complication, decisive turning point, resolution/transition permitted.\n' : ''}${settings.nextBeatHints ? '- "next" must not repeat anything already listed in "acts" and must fit the current scene type and stage.' : ''}${preferenceRule}
+${settings.slowBurnEnabled ? '- "stage" is an integer 1-6 using the reported scene type: setup, engagement, first meaningful development, deepening/complication, decisive turning point, resolution/transition permitted.\n' : ''}${settings.nextBeatHints ? '- "next" must propose future developments that follow naturally from the current topic, any unanswered direct question, and "dialogue_flow.new_facts". Do not repeat, paraphrase, summarize, or reenact anything already in "acts" or "dialogue_flow.new_facts".' : ''}${preferenceRule}
 - Include every present character. Use the exact names from the log.
 - If something is unknown, use an empty string. Return the JSON object only.`;
     const user = `${preferenceText ? `CHARACTER PREFERENCES (reference for "next" only):\n${preferenceText}\n\n` : ''}Log excerpt (oldest first):\n\n${buildRefineInput()}`;

@@ -178,6 +178,11 @@
     margin-top: 4px;
 }
 
+.ttotto-sfw-settings .tsf-flow-subhead {
+    margin-top: 2px;
+    font-size: 0.9em;
+}
+
 .ttotto-sfw-settings .tsf-acts-list {
     display: flex;
     flex-wrap: wrap;
