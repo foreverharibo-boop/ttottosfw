@@ -14,8 +14,11 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.1';
+const EXTENSION_VERSION = '0.2.3';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
+const DEVELOPER_UNLOCK_TAPS = 7;
+const DEVELOPER_TAP_RESET_MS = 5000;
+const DEVELOPER_PASSWORD = '130918';
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
 const PROMPT_ROLE_SYSTEM = 0;
@@ -179,8 +182,9 @@ const INTENSITY_SCALE_LINES = Object.freeze([
 ]);
 
 const DEFAULT_SETTINGS = Object.freeze({
-    settingsSchemaVersion: 3,
+    settingsSchemaVersion: 4,
     enabled: true,
+    developerMode: false,
     featurePreset: 'narrative', // continuity | basic | narrative | slowburn | custom
     repeatGuard: true,
     dialogueBeatGuard: true, // 최근 대사 의도·기능 반복 방지
@@ -264,6 +268,8 @@ let refineAbortController = null;
 let refineTimer = null;
 let popupOpen = false;
 let settingsHomeParent = null;
+let developerTapCount = 0;
+let developerTapTimer = null;
 const registeredEventHandlers = [];
 
 // ───────────────────────── 컨텍스트/설정 ─────────────────────────
@@ -293,9 +299,19 @@ function getSettings() {
         // 기존 사용자의 세부 선택은 덮어쓰지 않고 사용자 설정으로 보존한다.
         settings.featurePreset = 'custom';
     }
+    // v4: 목표 장면 유지는 개발자 전용. 구버전에서 남은 활성 목표가 뒤에서 재개되지 않게 정리한다.
+    if (previousSchemaVersion < 4) {
+        settings.developerMode = false;
+        const meta = context.chatMetadata?.[CHAT_STATE_KEY];
+        if (meta) {
+            meta.slowBurnTargetActive = false;
+            meta.slowBurnTargetCompleted = false;
+            meta.slowBurnRecoveryPending = false;
+        }
+    }
     settings.armMode = 'always';
     if (settings.featurePreset !== 'custom' && !FEATURE_PRESETS[settings.featurePreset]) settings.featurePreset = 'narrative';
-    settings.settingsSchemaVersion = 3;
+    settings.settingsSchemaVersion = 4;
     // 상태 JSON은 짧으므로 과도한 출력 상한을 제한해 보조 호출 비용을 줄인다.
     const refineTokens = Number(settings.refineMaxTokens);
     settings.refineMaxTokens = Number.isFinite(refineTokens)
@@ -309,7 +325,7 @@ function getSettings() {
     if (!settings.cardLinkSelected || typeof settings.cardLinkSelected !== 'object' || Array.isArray(settings.cardLinkSelected)) {
         settings.cardLinkSelected = {};
     }
-    if (previousSchemaVersion < 3 || settings.refineMaxTokens !== refineTokens) {
+    if (previousSchemaVersion < 4 || settings.refineMaxTokens !== refineTokens) {
         context.saveSettingsDebounced?.();
     }
     return settings;
@@ -317,6 +333,53 @@ function getSettings() {
 
 function saveSettings() {
     getContext().saveSettingsDebounced();
+}
+
+function setDeveloperMode(enabled) {
+    const settings = getSettings();
+    settings.developerMode = Boolean(enabled);
+
+    if (!settings.developerMode) {
+        const meta = getChatMeta(false);
+        if (meta) {
+            meta.slowBurnTargetActive = false;
+            meta.slowBurnTargetCompleted = false;
+            meta.slowBurnRecoveryPending = false;
+            saveChatMeta();
+        }
+    }
+    saveSettings();
+    updateUi();
+    toastr.success(
+        settings.developerMode ? '개발자 모드를 활성화했어요.' : '개발자 모드를 해제했어요.',
+        '🫧또또SFW',
+    );
+}
+
+function handleDeveloperTitleTap(event) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+
+    developerTapCount += 1;
+    clearTimeout(developerTapTimer);
+    developerTapTimer = setTimeout(() => {
+        developerTapCount = 0;
+        developerTapTimer = null;
+    }, DEVELOPER_TAP_RESET_MS);
+
+    if (developerTapCount < DEVELOPER_UNLOCK_TAPS) return;
+
+    developerTapCount = 0;
+    clearTimeout(developerTapTimer);
+    developerTapTimer = null;
+
+    const entered = window.prompt('개발자 모드 비밀번호를 입력하세요.');
+    if (entered === null) return;
+    if (entered.trim() !== DEVELOPER_PASSWORD) {
+        toastr.error('비밀번호가 올바르지 않아요.', '🫧또또SFW');
+        return;
+    }
+    setDeveloperMode(!getSettings().developerMode);
 }
 
 function getChatMeta(create = true) {
@@ -1120,12 +1183,13 @@ function slowBurnSessionStartCount() {
 
 function slowBurnTargetProgress() {
     const meta = getChatMeta(false);
+    const developerMode = Boolean(getSettings().developerMode);
     const target = sanitizeSlowBurnTarget(meta?.slowBurnTarget);
     const requiredTurns = clampSlowBurnTargetTurns(meta?.slowBurnTargetTurns);
     const completedTurns = meta?.slowBurnSessionActive
         ? Math.max(0, assistantMessages().length - slowBurnSessionStartCount())
         : 0;
-    const active = Boolean(meta?.slowBurnTargetActive && target && meta?.slowBurnSessionActive);
+    const active = Boolean(developerMode && meta?.slowBurnTargetActive && target && meta?.slowBurnSessionActive);
     return {
         target,
         requiredTurns,
@@ -1798,7 +1862,8 @@ function applyManualEdit(mutator) {
 
 function renderSlowBurnPanel(settings) {
     const card = element('tsf-slow-burn-card');
-    card.hidden = !settings.slowBurnEnabled;
+    const developerMode = Boolean(settings.developerMode);
+    card.hidden = !settings.slowBurnEnabled && !developerMode;
     if (card.hidden) return;
 
     const stageHead = card.querySelector('.tsf-slow-burn-head');
@@ -1810,6 +1875,8 @@ function renderSlowBurnPanel(settings) {
     const targetProgress = progress.target;
     const targetInput = element('tsf-slow-burn-target');
     const targetTurnsInput = element('tsf-slow-burn-target-turns');
+    element('tsf-slow-burn-target-box').hidden = !developerMode;
+    element('tsf-slow-burn-target-note').hidden = !developerMode;
     if (document.activeElement !== targetInput) targetInput.value = targetProgress.target;
     if (document.activeElement !== targetTurnsInput) targetTurnsInput.value = String(targetProgress.requiredTurns);
     targetInput.disabled = targetProgress.active;
@@ -2208,6 +2275,10 @@ function updateUi() {
         if (meta?.enabled) syncNsfwSuspension();
         const nsfwSuspended = Boolean(meta?.nsfwSuspended);
 
+        const popupTitle = element('tsf-popup-title');
+        if (popupTitle) popupTitle.textContent = settings.developerMode ? '🫧 또또SFW 🧪' : '🫧 또또SFW';
+        element('tsf-header-title').textContent = settings.developerMode ? '또또SFW 🧪' : '또또SFW';
+
         element('tsf-enabled').checked = Boolean(settings.enabled);
         element('tsf-chat-enabled').checked = Boolean(meta?.enabled);
         element('tsf-feature-preset').value = String(settings.featurePreset);
@@ -2282,6 +2353,7 @@ function bindSetting(id, key, parser = (value) => value, after = null) {
 function bindUi() {
     // 탭 클릭은 루트 위임으로 — 패널이 팝업으로 이동해도, 어떤 환경에서도 확실히 잡힌다
     const root = document.getElementById('ttotto-sfw-settings');
+    element('tsf-header-title').addEventListener('click', handleDeveloperTitleTap);
     root.addEventListener('click', (event) => {
         const button = event.target?.closest?.('[data-tsf-tab]');
         if (button && root.contains(button)) {
@@ -2424,6 +2496,7 @@ function bindUi() {
     element('tsf-force-arm').addEventListener('click', forceToggleArm);
 
     const saveSlowBurnTargetDraft = () => {
+        if (!getSettings().developerMode) return;
         const meta = getChatMeta();
         meta.slowBurnTarget = sanitizeSlowBurnTarget(element('tsf-slow-burn-target').value);
         meta.slowBurnTargetTurns = clampSlowBurnTargetTurns(element('tsf-slow-burn-target-turns').value);
@@ -2441,6 +2514,7 @@ function bindUi() {
     });
     element('tsf-slow-burn-target-start').addEventListener('click', () => {
         const settings = getSettings();
+        if (!settings.developerMode) return;
         const target = sanitizeSlowBurnTarget(element('tsf-slow-burn-target').value);
         const turns = clampSlowBurnTargetTurns(element('tsf-slow-burn-target-turns').value);
         if (!target) {
@@ -2472,6 +2546,7 @@ function bindUi() {
         updateUi();
     });
     element('tsf-slow-burn-target-stop').addEventListener('click', () => {
+        if (!getSettings().developerMode) return;
         const meta = getChatMeta();
         meta.slowBurnTargetActive = false;
         meta.slowBurnTargetCompleted = false;
@@ -2590,6 +2665,7 @@ function buildPopupShell() {
         if (event.target === overlay) closePopup();
     });
     overlay.querySelector('#tsf-popup-close').addEventListener('click', closePopup);
+    overlay.querySelector('#tsf-popup-title').addEventListener('click', handleDeveloperTitleTap);
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape' && popupOpen) closePopup();
     });
