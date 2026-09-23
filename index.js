@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.1.0';
+const EXTENSION_VERSION = '0.2.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -27,21 +27,97 @@ const STATE_TAG_LOOSE_REGEX = /```(?:json)?\s*<sfw_scene\b[^>]*>[\s\S]*?<\/sfw_s
 const STATE_TRAILING_ACK_REGEX = /(<\/sfw_scene>[ \t]*(?:\r?\n[ \t]*```)?)[ \t\r\n]+(?:no\s+changes?|unchanged)[ \t]*[.!]?[ \t]*$/i;
 
 const PACE_INSTRUCTIONS = Object.freeze({
-    hold: 'Maintain the current stage of the scene. Deepen sensation and reaction without jumping ahead.',
+    hold: 'Maintain the current stage of the scene. Deepen relevant detail, consequence, dialogue, and reaction without jumping ahead.',
     slow: 'Move the scene forward to its next natural beat. Advance gradually — one meaningful step per response.',
     push: 'Actively escalate. Each response must clearly progress the scene beyond where the previous one ended.',
 });
 
-// 슬로우번 단계 — 특정 행위가 아니라 장면의 서사적 진행도를 추적한다. 로맨스든 갈등이든 어떤 아크에도 쓸 수 있게 일반화.
-const SLOW_BURN_STAGES = Object.freeze([
-    null,
-    { en: 'Tension and atmosphere', ko: '긴장과 분위기 형성' },
-    { en: 'Approach through gaze, words, and proximity', ko: '시선·말·거리 좁히기' },
-    { en: 'First meaningful exchange or contact', ko: '첫 의미 있는 교류·접촉' },
-    { en: 'Deepening connection and reactions', ko: '관계와 반응 심화' },
-    { en: 'Turning point or decisive escalation', ko: '전환점·고조' },
-    { en: 'Resolution or conclusion permitted', ko: '해소·결말 허용' },
-]);
+// 장면 유형마다 진행의 의미가 다르므로 슬로우번 단계를 따로 둔다.
+const SCENE_TYPE_DEFS = Object.freeze({
+    general: Object.freeze({
+        ko: '일반',
+        stages: Object.freeze([null,
+            { en: 'Situation and atmosphere established', ko: '상황과 분위기 형성' },
+            { en: 'Characters engage with the immediate situation', ko: '현재 상황에 관여' },
+            { en: 'First meaningful development', ko: '첫 의미 있는 전개' },
+            { en: 'Development deepens or gains a complication', ko: '전개 심화·변수 발생' },
+            { en: 'Decisive turning point', ko: '결정적 전환점' },
+            { en: 'Resolution or transition permitted', ko: '해소·전환 허용' },
+        ]),
+    }),
+    daily: Object.freeze({
+        ko: '일상',
+        stages: Object.freeze([null,
+            { en: 'Everyday situation established', ko: '일상 상황 형성' },
+            { en: 'Small interaction begins', ko: '작은 상호작용 시작' },
+            { en: 'Shared activity develops', ko: '함께하는 행동 전개' },
+            { en: 'Mood or relationship gains depth', ko: '분위기·관계 심화' },
+            { en: 'Meaningful everyday beat', ko: '의미 있는 일상 전개' },
+            { en: 'Natural pause or transition permitted', ko: '자연스러운 마무리·전환 허용' },
+        ]),
+    }),
+    conversation: Object.freeze({
+        ko: '대화',
+        stages: Object.freeze([null,
+            { en: 'Topic and conversational mood established', ko: '주제와 대화 분위기 형성' },
+            { en: 'Initial exchange of views', ko: '초기 의견 교환' },
+            { en: 'Meaningful question, disclosure, or challenge', ko: '핵심 질문·고백·문제 제기' },
+            { en: 'Response, clarification, or deeper exchange', ko: '응답·해명·대화 심화' },
+            { en: 'Decision or conversational turning point', ko: '결정·대화 전환점' },
+            { en: 'Topic resolution or shift permitted', ko: '주제 정리·전환 허용' },
+        ]),
+    }),
+    romance: Object.freeze({
+        ko: '로맨스',
+        stages: Object.freeze([null,
+            { en: 'Awareness and emotional atmosphere', ko: '감정 인식과 분위기 형성' },
+            { en: 'Approach through words, attention, or proximity', ko: '말·관심·거리 좁히기' },
+            { en: 'First meaningful gesture or exchange', ko: '첫 의미 있는 표현·교류' },
+            { en: 'Emotional connection deepens', ko: '감정적 관계 심화' },
+            { en: 'Relationship turning point', ko: '관계의 전환점' },
+            { en: 'Emotional resolution or relationship transition permitted', ko: '감정 해소·관계 전환 허용' },
+        ]),
+    }),
+    conflict: Object.freeze({
+        ko: '갈등',
+        stages: Object.freeze([null,
+            { en: 'Friction or disagreement emerges', ko: '마찰·의견 충돌 발생' },
+            { en: 'Positions and stakes become clear', ko: '입장과 이해관계 확인' },
+            { en: 'Direct confrontation begins', ko: '직접 대립 시작' },
+            { en: 'Conflict escalates or reveals its cause', ko: '갈등 고조·원인 드러남' },
+            { en: 'Decisive response or turning point', ko: '결정적 대응·전환점' },
+            { en: 'Resolution, rupture, or consequence permitted', ko: '해결·결렬·결과 허용' },
+        ]),
+    }),
+    action: Object.freeze({
+        ko: '액션',
+        stages: Object.freeze([null,
+            { en: 'Threat or objective established', ko: '위협·목표 확인' },
+            { en: 'Engagement begins', ko: '행동 개시' },
+            { en: 'Active exchange or pursuit', ko: '공방·추격 진행' },
+            { en: 'Complication or danger intensifies', ko: '변수·위험 고조' },
+            { en: 'Decisive action', ko: '결정적 행동' },
+            { en: 'Outcome and aftermath permitted', ko: '결과·후속 장면 허용' },
+        ]),
+    }),
+    investigation: Object.freeze({
+        ko: '조사·미스터리',
+        stages: Object.freeze([null,
+            { en: 'Question or mystery established', ko: '의문·사건 형성' },
+            { en: 'Clues are gathered', ko: '단서 수집' },
+            { en: 'Evidence is connected', ko: '증거 연결' },
+            { en: 'Theory is tested or challenged', ko: '가설 검증·반전' },
+            { en: 'Key revelation', ko: '핵심 진실 발견' },
+            { en: 'Conclusion or next case transition permitted', ko: '결론·다음 국면 전환 허용' },
+        ]),
+    }),
+});
+
+const SCENE_TYPE_KEYS = new Set(Object.keys(SCENE_TYPE_DEFS));
+
+function sceneTypeDef(sceneType) {
+    return SCENE_TYPE_DEFS[SCENE_TYPE_KEYS.has(String(sceneType)) ? String(sceneType) : 'general'];
+}
 
 const SLOW_BURN_MIN_TURNS = Object.freeze({
     gentle: 1,
@@ -52,14 +128,14 @@ const SLOW_BURN_TARGET_MAX_TURNS = 20;
 const SLOW_BURN_TARGET_MAX_LENGTH = 200;
 const DIALOGUE_BEAT_WINDOW = 2;
 
-// 장면 스타일 다이얼 — 무장 중에만 적용
+// 장면 스타일 다이얼 — 개입 중에만 적용
 const STYLE_LENGTH_INSTRUCTIONS = Object.freeze({
     tight: 'Length: keep the response tight — 2-3 short paragraphs. Every sentence must carry sensation, action, or reaction; cut filler narration. Leave room for the user to act.',
     normal: '',
     long: 'Length: write a full, unhurried response — take space to build each moment. Do not rush through beats; linger where it matters.',
 });
 const STYLE_BALANCE_INSTRUCTIONS = Object.freeze({
-    dialogue: 'Balance: dialogue-forward. The character keeps talking through the scene — teasing, reacting, murmuring, demanding. Physical description supports the dialogue, not the other way around.',
+    dialogue: 'Balance: dialogue-forward. Keep the characters actively exchanging relevant dialogue, reactions, questions, and answers. Physical description supports the conversation, not the other way around.',
     balanced: '',
     sensory: 'Balance: sensory-forward. Prioritize concrete physical sensation — touch, heat, breath, weight, sound. Keep dialogue sparse and purposeful.',
     internal: 'Balance: interiority-forward. Keep the character\'s inner voice present — thoughts, restraint, want, conflict — woven through the physical action.',
@@ -67,16 +143,14 @@ const STYLE_BALANCE_INSTRUCTIONS = Object.freeze({
 
 // 해제 브릿지 — 개입 해제 직후 딱 한 번, 장면을 자연스럽게 마무리시키는 지시
 const BRIDGE_LINES = [
-    '[Scene Wind-Down] The intimate scene has just concluded. This response is the wind-down: settle the afterglow naturally — calming breath, small gestures, quiet words, gentle humor if it fits the characters.',
-    'Reflect what just happened in the characters\' mood and closeness. Do not restart or escalate the scene, and do not jump abruptly to unrelated everyday narration.',
+    '[Scene Transition Bridge] The current scene has just reached a stopping point. Use this response to connect it naturally to what follows through a brief consequence, reaction, transition, or quiet continuation that fits the genre.',
+    'Preserve the established time, place, character state, and unresolved conversational context. Do not abruptly teleport, time-skip, or jump to an unrelated scene without an explicit transition on the page.',
 ];
 
 // 실질적 무제한 — 잘림 방지용 안전 상한만 백만으로 걸어둔다
 const SAFETY_LIMIT = 1000000;
 
-// 강도 자동 무장 히스테리시스: 이 강도 이상이면 개입 시작, 이 강도 이하면 해제
-const AUTO_ARM_ON = 5;
-const AUTO_ARM_OFF = 2;
+const INTENSITY_HIGH = 5;
 
 const REFINE_MESSAGE_CHAR_LIMIT = 12000;
 const REFINE_TOTAL_CHAR_LIMIT = 60000;
@@ -90,31 +164,82 @@ const INTENSITY_SCALE_LINES = Object.freeze([
 ]);
 
 const DEFAULT_SETTINGS = Object.freeze({
-    settingsSchemaVersion: 2,
+    settingsSchemaVersion: 3,
     enabled: true,
+    featurePreset: 'narrative', // continuity | basic | narrative | slowburn | custom
+    repeatGuard: true,
     dialogueBeatGuard: true, // 최근 대사 의도·기능 반복 방지
+    dialogueFlow: true, // 현재 주제·직전 질문·새 사실 추적
+    transitionGuard: true, // 갑작스러운 장소·시간·장면 전환 방지
     dialogueWindow: 2, // 대사 의도를 "또 하지 마" 목록에 올릴 최근 AI 답변 수 (1~6)
     // CardInject 연동: 캐시트 카테고리를 다음 전개 힌트의 참고 자료로 사용 (개입 중에만 주입)
     cardLinkEnabled: false,
     cardLinkSelected: {}, // { [캐릭터 키]: [카테고리 key, ...] }
-    // 'always' = 채팅 토글이 곧 개입 스위치 (기본) / 'auto' = 서사 강도 태그를 감시하다 임계치에서 자동 개입
+    // SFW는 잔잔한 장면에서도 연속성이 필요하므로 상시 개입만 사용한다.
     armMode: 'always',
     nextBeatHints: true,
     repeatWindow: 3,
     maxBannedActs: 15, // 반복 금지 목록 총량 상한 — 넘치면 오래된 것부터 제외
-    paceMode: 'auto', // 'auto'(온도 연동) | 'hold' | 'slow' | 'push'
+    paceMode: 'auto', // 'auto'(서사 강도 연동) | 'hold' | 'slow' | 'push'
     slowBurnEnabled: false,
     slowBurnIntensity: 'slow', // 'gentle'(단계당 1턴) | 'slow'(2턴) | 'verySlow'(3턴)
     slowBurnUserOverride: true, // 사용자가 직접 다음 단계 행동을 시작하면 제한보다 우선
-    globalBans: [], // 전역 하드 리밋 — 모든 채팅의 무장 장면에 절대 금지로 주입
-    styleLength: 'normal', // 'tight' | 'normal' | 'long' — 무장 중 응답 길이
-    styleBalance: 'balanced', // 'dialogue' | 'balanced' | 'sensory' | 'internal' — 무장 중 묘사 밸런스
+    globalBans: [], // 전역 하드 리밋 — 모든 채팅의 개입 장면에 절대 금지로 주입
+    styleLength: 'normal', // 'tight' | 'normal' | 'long' — 개입 중 응답 길이
+    styleBalance: 'balanced', // 'dialogue' | 'balanced' | 'sensory' | 'internal' — 개입 중 묘사 밸런스
     exitBridge: true, // 해제 직후 한 번, 장면 마무리 지시 주입
     autoRefine: true,
     refineProfileId: '',
     refineMaxTokens: 3000,
     refineContextMessages: 8,
 });
+
+const FEATURE_PRESETS = Object.freeze({
+    continuity: Object.freeze({
+        repeatGuard: false,
+        dialogueBeatGuard: false,
+        dialogueFlow: false,
+        nextBeatHints: false,
+        transitionGuard: true,
+        slowBurnEnabled: false,
+    }),
+    basic: Object.freeze({
+        repeatGuard: true,
+        dialogueBeatGuard: true,
+        dialogueFlow: false,
+        nextBeatHints: false,
+        transitionGuard: true,
+        slowBurnEnabled: false,
+    }),
+    narrative: Object.freeze({
+        repeatGuard: true,
+        dialogueBeatGuard: true,
+        dialogueFlow: true,
+        nextBeatHints: true,
+        transitionGuard: true,
+        slowBurnEnabled: false,
+    }),
+    slowburn: Object.freeze({
+        repeatGuard: true,
+        dialogueBeatGuard: true,
+        dialogueFlow: true,
+        nextBeatHints: true,
+        transitionGuard: true,
+        slowBurnEnabled: true,
+    }),
+});
+
+function applyFeaturePreset(settings, preset) {
+    const config = FEATURE_PRESETS[preset];
+    if (!config) return false;
+    Object.assign(settings, config);
+    settings.featurePreset = preset;
+    return true;
+}
+
+function markFeaturePresetCustom(settings = getSettings()) {
+    settings.featurePreset = 'custom';
+}
 
 let runtimeActive = true;
 let uiReady = false;
@@ -148,7 +273,14 @@ function getSettings() {
     }
     // v2: UI 추천값과 실제 기본값을 자동으로 통일한다.
     if (previousSchemaVersion < 2 && settings.paceMode === 'slow') settings.paceMode = 'auto';
-    settings.settingsSchemaVersion = 2;
+    // v3: SFW는 낮은 강도의 일상에서도 연속성이 필요하므로 채팅 토글이 곧 개입 스위치다.
+    if (previousSchemaVersion < 3) {
+        // 기존 사용자의 세부 선택은 덮어쓰지 않고 사용자 설정으로 보존한다.
+        settings.featurePreset = 'custom';
+    }
+    settings.armMode = 'always';
+    if (settings.featurePreset !== 'custom' && !FEATURE_PRESETS[settings.featurePreset]) settings.featurePreset = 'narrative';
+    settings.settingsSchemaVersion = 3;
     // 상태 JSON은 짧으므로 과도한 출력 상한을 제한해 보조 호출 비용을 줄인다.
     const refineTokens = Number(settings.refineMaxTokens);
     settings.refineMaxTokens = Number.isFinite(refineTokens)
@@ -162,7 +294,7 @@ function getSettings() {
     if (!settings.cardLinkSelected || typeof settings.cardLinkSelected !== 'object' || Array.isArray(settings.cardLinkSelected)) {
         settings.cardLinkSelected = {};
     }
-    if (previousSchemaVersion < 2 || settings.refineMaxTokens !== refineTokens) {
+    if (previousSchemaVersion < 3 || settings.refineMaxTokens !== refineTokens) {
         context.saveSettingsDebounced?.();
     }
     return settings;
@@ -219,18 +351,14 @@ function isSupervising() {
     return Boolean(runtimeActive && settings.enabled && meta?.enabled);
 }
 
-// 완전 무장: 연속성·반복금지·진행 지시까지 전부 주입하는 상태
+// 개입 중: 연속성·반복금지·진행 지시까지 전부 주입하는 상태
 function isFullyArmed() {
-    if (!isSupervising()) return false;
-    const settings = getSettings();
-    if (settings.armMode === 'always') return true;
-    return Boolean(getChatMeta(false)?.autoArmed);
+    return isSupervising();
 }
 
 // ───────────────────────── 개입 시작/해제 ─────────────────────────
 
-// 원탭 개입 시작/해제. armMode가 'always'면 채팅 토글 자체를 켜고 끄고,
-// 'auto'면 서사 강도 자동 감지와 별개로 지금 바로 개입을 시작/해제한다.
+// 원탭 개입 시작/해제. SFW는 낮은 강도의 일상 장면도 계속 추적하므로 채팅 토글 자체를 켜고 끈다.
 function forceToggleArm() {
     const settings = getSettings();
     if (!settings.enabled) {
@@ -238,36 +366,17 @@ function forceToggleArm() {
         return;
     }
     const meta = getChatMeta();
-    if (settings.armMode === 'always') {
-        const wasEnabled = Boolean(meta.enabled);
-        meta.enabled = !wasEnabled;
-        if (!meta.enabled) {
-            meta.bridgePending = Boolean(settings.exitBridge);
-            resetSlowBurnSession(meta);
-        } else {
-            meta.bridgePending = false;
-        }
-        saveChatMeta();
-        if (meta.enabled && settings.slowBurnEnabled) startSlowBurnSessionIfNeeded();
-        toastr.info(meta.enabled ? '이 채팅에서 개입을 시작해요.' : '이 채팅에서 개입을 껐어요.', '🫧또또SFW');
-        updateUi();
-        return;
-    }
-    if (!meta.enabled) meta.enabled = true; // 채팅 토글이 꺼져 있었으면 같이 켠다
-    if (meta.autoArmed) {
-        meta.autoArmed = false;
+    const wasEnabled = Boolean(meta.enabled);
+    meta.enabled = !wasEnabled;
+    if (!meta.enabled) {
         meta.bridgePending = Boolean(settings.exitBridge);
         resetSlowBurnSession(meta);
-        toastr.info('개입을 해제하고 대기로 돌아가요.', '🫧또또SFW');
     } else {
-        meta.autoArmed = true;
-        toastr.info('지금부터 연속성 개입을 시작해요.', '🫧또또SFW');
-        if (settings.autoRefine) {
-            clearTimeout(refineTimer);
-            refineTimer = setTimeout(() => { void runRefine(); }, 300);
-        }
+        meta.bridgePending = false;
     }
     saveChatMeta();
+    if (meta.enabled && settings.slowBurnEnabled) startSlowBurnSessionIfNeeded();
+    toastr.info(meta.enabled ? '이 채팅에서 개입을 시작해요.' : '이 채팅에서 개입을 껐어요.', '🫧또또SFW');
     updateUi();
 }
 
@@ -298,18 +407,41 @@ function hasBi(bi) {
     return Boolean(biText(bi, 'en') || biText(bi, 'ko'));
 }
 
+function sanitizeBiArray(value, limit = 8) {
+    return (Array.isArray(value) ? value : []).map(toBi).filter(hasBi).slice(0, limit);
+}
+
 function sanitizeState(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const clean = {
         location: { en: '', ko: '' },
+        time: { en: '', ko: '' },
+        environment: { en: '', ko: '' },
+        importantObjects: {},
         characters: {},
         acts: [],
         dialogueBeats: [],
         dialogueReported: Object.prototype.hasOwnProperty.call(raw, 'dialogue_beats')
             || Object.prototype.hasOwnProperty.call(raw, 'dialogueBeats'),
+        dialogueFlow: {
+            topic: { en: '', ko: '' },
+            lastQuestion: { en: '', ko: '' },
+            newFacts: [],
+        },
+        sceneType: 'general',
         stage: null,
     };
     clean.location = toBi(raw.location);
+    clean.time = toBi(raw.time);
+    clean.environment = toBi(raw.environment);
+    const importantObjects = raw.important_objects && typeof raw.important_objects === 'object'
+        ? raw.important_objects
+        : raw.importantObjects && typeof raw.importantObjects === 'object' ? raw.importantObjects : {};
+    for (const [name, value] of Object.entries(importantObjects).slice(0, 32)) {
+        if (!name) continue;
+        const state = toBi(value);
+        if (hasBi(state)) clean.importantObjects[String(name).slice(0, 120)] = state;
+    }
     const characters = raw.characters && typeof raw.characters === 'object' ? raw.characters : {};
     for (const [name, info] of Object.entries(characters).slice(0, 64)) {
         if (!name || typeof info !== 'object' || info === null) continue;
@@ -317,6 +449,7 @@ function sanitizeState(raw) {
             appearance: toBi(info.appearance),
             position: toBi(info.position),
             holding: toBi(info.holding),
+            condition: toBi(info.condition),
         };
     }
     const acts = Array.isArray(raw.acts) ? raw.acts : [];
@@ -325,14 +458,29 @@ function sanitizeState(raw) {
         ? raw.dialogue_beats
         : Array.isArray(raw.dialogueBeats) ? raw.dialogueBeats : [];
     clean.dialogueBeats = dialogueBeats.map(toBi).filter(hasBi).slice(0, 4);
+    const dialogueFlow = raw.dialogue_flow && typeof raw.dialogue_flow === 'object'
+        ? raw.dialogue_flow
+        : raw.dialogueFlow && typeof raw.dialogueFlow === 'object' ? raw.dialogueFlow : {};
+    clean.dialogueFlow = {
+        topic: toBi(dialogueFlow.topic),
+        lastQuestion: toBi(dialogueFlow.last_question ?? dialogueFlow.lastQuestion),
+        newFacts: sanitizeBiArray(dialogueFlow.new_facts ?? dialogueFlow.newFacts, 3),
+    };
+    clean.sceneType = SCENE_TYPE_KEYS.has(String(raw.scene_type ?? raw.sceneType))
+        ? String(raw.scene_type ?? raw.sceneType)
+        : 'general';
     const intensity = Number(raw.intensity);
     clean.intensity = Number.isFinite(intensity) ? Math.max(0, Math.min(10, Math.round(intensity))) : null;
     const stage = raw.stage === null || raw.stage === undefined ? NaN : Number(raw.stage);
     clean.stage = Number.isFinite(stage) ? Math.max(1, Math.min(6, Math.round(stage))) : null;
     const next = Array.isArray(raw.next) ? raw.next : [];
     clean.next = next.map(toBi).filter(hasBi).slice(0, 8);
-    const hasCharacters = Object.values(clean.characters).some((info) => hasBi(info.appearance) || hasBi(info.position) || hasBi(info.holding));
-    if (!hasBi(clean.location) && !hasCharacters && !clean.acts.length && !clean.dialogueBeats.length && clean.intensity === null && clean.stage === null && !clean.next.length) return null;
+    const hasCharacters = Object.values(clean.characters).some((info) => hasBi(info.appearance) || hasBi(info.position) || hasBi(info.holding) || hasBi(info.condition));
+    const hasDialogueFlow = hasBi(clean.dialogueFlow.topic) || hasBi(clean.dialogueFlow.lastQuestion) || clean.dialogueFlow.newFacts.length > 0;
+    if (!hasBi(clean.location) && !hasBi(clean.time) && !hasBi(clean.environment)
+        && !Object.keys(clean.importantObjects).length && !hasCharacters && !clean.acts.length
+        && !clean.dialogueBeats.length && !hasDialogueFlow && clean.intensity === null
+        && clean.stage === null && !clean.next.length) return null;
     return clean;
 }
 
@@ -341,10 +489,10 @@ function stateCompletenessIssues(state, settings = getSettings()) {
     const issues = [];
     if (!hasBi(state.location)) issues.push('location');
     const hasCharacterState = Object.values(state.characters ?? {}).some(
-        (info) => hasBi(info.appearance) || hasBi(info.position) || hasBi(info.holding),
+        (info) => hasBi(info.appearance) || hasBi(info.position) || hasBi(info.holding) || hasBi(info.condition),
     );
     if (!hasCharacterState) issues.push('characters');
-    if (!state.acts?.length) issues.push('acts');
+    if (settings.repeatGuard && !state.acts?.length) issues.push('acts');
     if (state.intensity === null || state.intensity === undefined) issues.push('intensity');
     if (settings.slowBurnEnabled && (state.stage === null || state.stage === undefined)) issues.push('stage');
     if (settings.nextBeatHints && !state.next?.length) issues.push('next');
@@ -537,6 +685,7 @@ function actMatchesPlainBan(act, ban) {
 // 최근 N턴의 전개(행위) 목록 — 오래된 것 → 최신 순.
 // 총량이 maxBannedActs를 넘으면 오래된 것부터 잘라서 주입문 비대화를 막는다.
 function recentActs(windowSize) {
+    if (!getSettings().repeatGuard) return [];
     const ignored = ignoredActSet();
     const messages = assistantMessages();
     const rows = [];
@@ -594,7 +743,7 @@ function recentDialogueBeats(windowSize = Number(getSettings().dialogueWindow) |
 // CardInject가 캐릭터별로 저장한 카테고리(extensionSettings.cardinject.perChar[캐릭터키].categories)를
 // 읽기 전용으로 참조한다. CardInject 쪽 코드는 건드리지 않는다.
 // 용도: 다음 전개 힌트를 만들 때 캐릭터 시트의 성향·취향 카테고리를 참고 자료로 쓴다.
-// 같은 카테고리를 CardInject에서 꺼두면(enabled 해제) 이 확장이 "무장 중에만" 주입하게 된다.
+// 같은 카테고리를 CardInject에서 꺼두면(enabled 해제) 이 확장이 "개입 중에만" 주입하게 된다.
 const CARD_LINK_STORE_KEY = 'cardinject';
 const CARD_LINK_CHAR_LIMIT = 2500; // 참고 자료 총량 상한 (주입문 비대화 방지)
 const CARD_LINK_HINT_RE = /preference|characteristic|habit|personality|성향|취향|선호|특징|습관|성격/i;
@@ -700,13 +849,27 @@ function buildCardPreferenceLines() {
 function buildStateLines(state) {
     const lines = [];
     if (hasBi(state.location)) lines.push(`- Location: ${biText(state.location, 'en')}`);
+    if (hasBi(state.time)) lines.push(`- Time/context: ${biText(state.time, 'en')}`);
+    if (hasBi(state.environment)) lines.push(`- Environment: ${biText(state.environment, 'en')}`);
+    for (const [name, objectState] of Object.entries(state.importantObjects ?? {})) {
+        if (hasBi(objectState)) lines.push(`- Important object "${name}": ${biText(objectState, 'en')}`);
+    }
     for (const [name, info] of Object.entries(state.characters)) {
         const parts = [];
         if (hasBi(info.appearance)) parts.push(`appearance: ${biText(info.appearance, 'en')}`);
         if (hasBi(info.position)) parts.push(`position/posture: ${biText(info.position, 'en')}`);
         if (hasBi(info.holding)) parts.push(`holding/carrying: ${biText(info.holding, 'en')}`);
+        if (hasBi(info.condition)) parts.push(`physical condition: ${biText(info.condition, 'en')}`);
         if (parts.length) lines.push(`- ${name} — ${parts.join('; ')}`);
     }
+    if (getSettings().dialogueFlow) {
+        if (hasBi(state.dialogueFlow?.topic)) lines.push(`- Current conversation topic: ${biText(state.dialogueFlow.topic, 'en')}`);
+        if (hasBi(state.dialogueFlow?.lastQuestion)) lines.push(`- Most recent direct question awaiting a response: ${biText(state.dialogueFlow.lastQuestion, 'en')}`);
+        if (state.dialogueFlow?.newFacts?.length) {
+            lines.push(`- Newly established facts: ${state.dialogueFlow.newFacts.map((fact) => biText(fact, 'en')).join('; ')}`);
+        }
+    }
+    lines.push(`- Scene type: ${state.sceneType || 'general'} (${sceneTypeDef(state.sceneType).ko})`);
     return lines;
 }
 
@@ -832,10 +995,12 @@ function slowBurnTargetProgress() {
 
 function consecutiveSlowBurnTurns(stage, startCount = slowBurnSessionStartCount()) {
     let turns = 0;
+    const currentSceneType = effectiveState().state?.sceneType || 'general';
     const messages = assistantMessages().slice(Math.max(0, startCount));
     for (let i = messages.length - 1; i >= 0; i--) {
         const snapshot = snapshotForMessage(messages[i]);
         if (!snapshot?.state) break;
+        if ((snapshot.state.sceneType || 'general') !== currentSceneType) break;
         if (stageFromState(snapshot.state) !== stage) break;
         turns++;
     }
@@ -881,7 +1046,7 @@ function buildTargetSlowBurnLines() {
         `USER TARGET SCENE: ${targetLabel}. This is a direct scene requirement, not a suggestion, possible next beat, topic, metaphor, or optional preference.`,
         `EXACT RUN: ${progress.completedTurns}/${progress.requiredTurns} assistant responses completed. The response you are writing now is ${responseNumber}/${progress.requiredTurns}.`,
         `IMMEDIATE START: from the first paragraph of this response, the CHARACTER must begin or actively continue ${targetLabel} on-page. Do not delay it with setup, anticipation, unrelated dialogue, a different act, or a transition toward it.`,
-        `Make ${targetLabel} the active, dominant, physically enacted scene throughout this entire response. Do not merely mention, discuss, promise, imagine, approach, summarize, or postpone it.`,
+        `Make ${targetLabel} the active, dominant, concretely enacted scene throughout this entire response. Do not merely mention, promise, imagine, summarize, or postpone it.`,
         'LANGUAGE RULE: the target may be written in Korean or another language. Understand its meaning directly before writing; never ignore it, quote it back, or treat it as unclear merely because the surrounding directive is English.',
         `The first through ${progress.requiredTurns}th responses ALL belong fully to ${targetLabel}. Even response ${progress.requiredTurns}/${progress.requiredTurns} must remain inside the target scene through its ending; only the following response may transition away.`,
         'ABSOLUTE HOLD: do not leave, replace, resolve, wind down, fade out, time-skip, cut to aftermath, fall asleep, separate, or move to a different scene while this target run is active. End on an open beat that can continue naturally.',
@@ -901,7 +1066,7 @@ function buildTargetFinalEnforcementLines() {
     return [
         '[FINAL TARGET ENFORCEMENT — obey before writing the prose]',
         `RESPONSE ${responseNumber}/${progress.requiredTurns}: enact ${targetLabel} immediately from the first paragraph and keep it as the main on-page action through the final paragraph.`,
-        `Do not substitute a related act, remain in preparation, ask permission again when consent is already established in context, or end before ${targetLabel} is actively happening.`,
+        `Do not substitute a merely related activity, remain in preparation, repeat setup that is already complete, or end before ${targetLabel} is actively happening.`,
         'The target itself overrides the recent-beat repetition ban; vary only its specific movements, dialogue, reactions, and sensory details.',
         'Before finishing, silently verify: (1) the target happened on-page, (2) it remained the dominant scene, and (3) the ending stays open for the next required target response. If any answer is no, revise the prose before returning it.',
     ];
@@ -910,10 +1075,14 @@ function buildTargetFinalEnforcementLines() {
 function buildSlowBurnLines(settings) {
     if (slowBurnTargetProgress().active) return buildTargetSlowBurnLines();
     const progress = slowBurnProgress(settings);
-    const current = SLOW_BURN_STAGES[progress.stage];
-    const maximum = SLOW_BURN_STAGES[progress.maxStage];
+    const state = effectiveState().state;
+    const sceneType = state?.sceneType || 'general';
+    const definition = sceneTypeDef(sceneType);
+    const current = definition.stages[progress.stage];
+    const maximum = definition.stages[progress.maxStage];
     const lines = [
         '[MANDATORY SLOW-BURN LOCK — highest-priority scene progression rule]',
+        `SCENE TYPE: ${sceneType}. Use the progression meaning for this genre rather than a one-size-fits-all progression.`,
         `SLOW-BURN SESSION: ${progress.sessionTurns}/${progress.requiredTurns} CHARACTER responses completed since this mode was activated.`,
         `CURRENT STAGE ${progress.stage}/6: ${current.en}.`,
         `MAXIMUM CHARACTER-INITIATED STAGE THIS RESPONSE: ${progress.maxStage}/6 (${maximum.en}).`,
@@ -949,49 +1118,55 @@ function buildSlowBurnLines(settings) {
     return lines;
 }
 
-const STATE_REPORT_LINES = [
-    'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
-    '<sfw_scene>{"_status":"updated","location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"appearance":"current appearance/notable state, English || 한국어","position":"current posture/position, English || 한국어","holding":"what they are currently holding/carrying, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"intensity":0,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</sfw_scene>',
-    'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
-    '"acts" rules: list ONLY substantive beats — plot, relationship, or emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
-    ...INTENSITY_SCALE_LINES,
-    'Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
-    'The optional top-level "_status" field is the ONLY place for a change acknowledgement: use "no_change" there if you need to signal that tracked state did not change; otherwise use "updated". All real state fields must still repeat their complete current values.',
-    'Never use placeholders such as "no change", "no changes", "unchanged", or "same" in location, character state, acts, intensity, or next. Never output any acknowledgement, status note, or meta-comment outside the <sfw_scene> block.',
-];
+function stateReportLines(settings, nextGuidance = '') {
+    const fields = [
+        '"_status":"updated"',
+        '"scene_type":"general"',
+        '"location":"short English phrase || 짧은 한국어 구"',
+        '"time":"current time or time context, English || 한국어"',
+        '"environment":"scene-relevant environmental state, English || 한국어"',
+        '"important_objects":{"object name":"current location/condition, English || 한국어"}',
+        '"characters":{"이름":{"appearance":"current appearance/clothing, English || 한국어","position":"current posture/position, English || 한국어","holding":"currently holding/carrying, English || 한국어","condition":"current physical condition, English || 한국어"}}',
+    ];
+    if (settings.dialogueFlow) {
+        fields.push('"dialogue_flow":{"topic":"current conversation topic, English || 한국어","last_question":"most recent direct CHARACTER question still awaiting a response, English || 한국어","new_facts":["0-3 facts newly established in this response, each English || 한국어"]}');
+    }
+    if (settings.dialogueBeatGuard) fields.push('"dialogue_beats":["0-3 dialogue intents from spoken lines, each English || 한국어"]');
+    if (settings.repeatGuard) fields.push('"acts":["1-4 significant new beats in this response, each English || 한국어"]');
+    fields.push('"intensity":0');
+    if (settings.slowBurnEnabled) fields.push('"stage":1');
+    if (settings.nextBeatHints) fields.push('"next":["2-3 fresh beats the scene could move to next, each English || 한국어"]');
 
-const SLOW_BURN_STATE_REPORT_LINES = [
-    'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
-    '<sfw_scene>{"_status":"updated","location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"appearance":"current appearance/notable state, English || 한국어","position":"current posture/position, English || 한국어","holding":"what they are currently holding/carrying, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"intensity":0,"stage":1,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</sfw_scene>',
-    'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
-    '"acts" rules: list ONLY substantive beats — plot, relationship, or emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
-    ...INTENSITY_SCALE_LINES,
-    '"stage" is the slow-burn progression stage as an integer from 1 to 6. Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
-    'The optional top-level "_status" field is the ONLY place for a change acknowledgement: use "no_change" there if you need to signal that tracked state did not change; otherwise use "updated". All real state fields must still repeat their complete current values.',
-    'Never use placeholders such as "no change", "no changes", "unchanged", or "same" in location, character state, acts, intensity, stage, or next. Never output any acknowledgement, status note, or meta-comment outside the <sfw_scene> block.',
-];
-
-function stateReportLines(slowBurnEnabled, dialogueGuard, nextGuidance = '') {
-    const lines = [...(slowBurnEnabled ? SLOW_BURN_STATE_REPORT_LINES : STATE_REPORT_LINES)];
+    const lines = [
+        'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
+        `<sfw_scene>{${fields.join(',')}}</sfw_scene>`,
+        'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
+        'Classify "scene_type" as exactly one of: general, daily, conversation, romance, conflict, action, investigation. Choose the type that best describes the response ending.',
+        'Keep the established "scene_type" when the scene merely contains a few lines of dialogue or a small action. Change it only when the dominant kind of scene genuinely shifts.',
+        'Repeat the complete current location, time context, environment, important-object states, and every present character state. Use an empty string or empty object only when the information is genuinely unknown or absent.',
+        'Track only scene-relevant important objects whose location or condition matters for continuity. Do not inventory ordinary background items.',
+        ...INTENSITY_SCALE_LINES,
+    ];
+    if (settings.repeatGuard) {
+        lines.push('"acts" rules: list ONLY substantive plot, relationship, emotional, action, or conversational developments that matter for repetition control. Skip routine logistics and tiny housekeeping actions. Include only what is NEW in this response.');
+    }
+    if (settings.dialogueBeatGuard) {
+        lines.push('"dialogue_beats" rules: list 0-3 conversational purposes used by the CHARACTER, not quotations or surface wording. Examples: answers a question, asks for clarification, gives advice, reveals a fact, challenges a claim, apologizes, reassures, jokes, or changes the subject. Use [] when there is no spoken dialogue.');
+    }
+    if (settings.dialogueFlow) {
+        lines.push('"dialogue_flow" rules: keep "topic" concise; put only the most recent direct CHARACTER question that still expects an answer in "last_question"; list only facts newly established in this response in "new_facts". Do not create a general unresolved-plot, promise, goal, or clue list.');
+    }
+    if (settings.slowBurnEnabled) {
+        lines.push('"stage" is the progression stage for the reported "scene_type", as an integer from 1 to 6. Judge it using that genre\'s stage meaning from the slow-burn directive.');
+    }
+    if (settings.nextBeatHints) lines.push('"next" must not repeat anything from "acts" and must fit the current scene type, continuity, and stage.');
     if (nextGuidance) lines.push(nextGuidance);
-    if (!dialogueGuard) return lines;
-    lines[1] = lines[1].replace(
-        ',"acts":',
-        ',"dialogue_beats":["0-3 dialogue intents from spoken lines, each \'English || 한국어\'"],"acts":',
-    );
-    lines.splice(4, 0,
-        '"dialogue_beats" rules: list 0-3 conversational purposes used by the CHARACTER in this response, not quotations or surface wording. Examples: asks for reassurance, repeats the same demand or plea, restates a promise, gives the same compliment, provokes a reaction, or asks the same question. Use [] when there is no spoken dialogue.',
+    lines.push(
+        'The optional top-level "_status" field is the ONLY place for a change acknowledgement: use "no_change" there if needed; otherwise use "updated". All real state fields must still repeat their complete current values.',
+        'Never use placeholders such as "no change", "no changes", "unchanged", or "same" in real state fields. Never output any acknowledgement, status note, or meta-comment outside the <sfw_scene> block.',
     );
     return lines;
 }
-
-// 감시 모드('auto') 전용 초경량 주입 — 장면 강도 한 줄만 요청 (평범한 장면에는 개입하지 않음)
-const MONITOR_REPORT_LINES = [
-    '[Scene Monitor] Write the response normally, then append exactly one machine-readable state line in this format. It is hidden from the reader:',
-    '<sfw_scene>{"_status":"updated","intensity":0}</sfw_scene>',
-    ...INTENSITY_SCALE_LINES,
-    'Report "intensity" factually. If you need to signal no change, use only the optional top-level "_status":"no_change" inside <sfw_scene>; otherwise use "updated". Never put a change acknowledgement or any other machine-status text outside the tag.',
-];
 
 function buildInjection() {
     const settings = getSettings();
@@ -999,12 +1174,10 @@ function buildInjection() {
     const targetActive = slowBurnTargetProgress().active;
     const dialogueGuard = Boolean(settings.dialogueBeatGuard);
 
-    // 무장 전: 해제 브릿지가 걸려 있으면 마무리 지시를 한 번 주입.
-    // 'auto' 모드는 그 외에도 강도 한 줄만 요청해 자동 개입 여부를 감시한다.
+    // 개입 해제 상태에서는 해제 브릿지가 걸린 경우에만 한 번 주입한다.
     if (!isFullyArmed()) {
         const parts = [];
         if (settings.exitBridge && getChatMeta(false)?.bridgePending) parts.push(...BRIDGE_LINES);
-        if (settings.armMode === 'auto') parts.push(...MONITOR_REPORT_LINES);
         return parts.join('\n');
     }
 
@@ -1017,10 +1190,24 @@ function buildInjection() {
         sections.push(
             'CURRENT SCENE STATE (established facts — never contradict them):',
             ...buildStateLines(state),
-            'Appearance changes, positions, locations, and held items only change through explicit on-page actions in your response. Never silently reset or teleport anything.',
+            'Appearance, physical condition, position, location, time context, environment, held items, and important-object states only change through explicit on-page actions or transitions. Never silently reset or teleport anything.',
         );
     } else {
         sections.push('No scene state has been recorded yet. Establish it in your response and report it in the state block below.');
+    }
+
+    if (settings.transitionGuard) {
+        sections.push(
+            '',
+            'SCENE TRANSITION GUARD: Do not change location, jump forward in time, end the current interaction, or cut to another scene without an explicit on-page transition that follows from the USER message or the current action. A transition is allowed when it is narrated clearly; a silent teleport, unexplained time skip, or abrupt topic/scene replacement is not.',
+        );
+    }
+
+    if (settings.dialogueFlow && state?.dialogueFlow) {
+        sections.push(
+            '',
+            'DIALOGUE CONTINUITY: Stay with the current conversational topic unless the USER changes or resolves it. Address the most recent direct question naturally when it is still relevant, but treat it as resolved if the USER message already answered or superseded it. Preserve newly established facts and do not make characters forget what was just learned.',
+        );
     }
 
     const customBans = (getChatMeta(false)?.customBans ?? []).filter(Boolean);
@@ -1053,8 +1240,8 @@ function buildInjection() {
                 '',
                 `DIALOGUE INTENTS ALREADY USED in the last ${dialogueRows.length} CHARACTER response(s) — do not repeat the same conversational function merely by paraphrasing it:`,
                 ...dialogueRows.map((row) => `- ${row.beats.map((beat) => biText(beat, 'en')).join(', ')}`),
-                'Keep the character voice, but give the spoken dialogue a genuinely new purpose or advance what is being said. Do not repeat the same pleasure-check, plea, praise, taunt, ownership claim, permission request, or reaction request in different words.',
-                'EXCEPTIONS: a direct answer to the USER, a necessary consent or safety clarification, and a deliberately meaningful refrain/catchphrase may be used when context truly requires it.',
+                'Keep the character voice, but give the spoken dialogue a genuinely new purpose or advance what is being said. Do not repeat the same question, reassurance, apology, praise, warning, challenge, request, joke, or demand merely with different wording.',
+                'EXCEPTIONS: a direct answer to the USER, a necessary clarification, a safety check, and a deliberately meaningful refrain or catchphrase may be used when context truly requires it.',
                 targetActive ? 'This guard must never be used to avoid, delay, or replace the active USER TARGET SCENE.' : '',
             );
         }
@@ -1085,7 +1272,7 @@ function buildInjection() {
     const nextGuidance = settings.nextBeatHints && !targetActive && cardLinkPreferenceText()
         ? '"next" rule: draw the candidates from the CHARACTER PREFERENCES above when they fit the current scene and stage. Keep them fresh — never repeat "acts" or anything already banned.'
         : '';
-    sections.push('', ...stateReportLines(settings.slowBurnEnabled, dialogueGuard, nextGuidance));
+    sections.push('', ...stateReportLines(settings, nextGuidance));
 
     // 가장 마지막 지시가 목표 실행 명령이 되도록 다시 고정한다.
     if (targetActive) sections.push('', ...buildTargetFinalEnforcementLines());
@@ -1171,28 +1358,38 @@ function buildRefineInput() {
 
 function refinePromptMessages() {
     const settings = getSettings();
-    const slowBurnEnabled = settings.slowBurnEnabled;
-    const dialogueGuard = Boolean(settings.dialogueBeatGuard);
-    const stageSchema = slowBurnEnabled ? ',"stage":1' : '';
-    const dialogueSchema = dialogueGuard ? ',"dialogue_beats":["0-3 dialogue intents from the final CHARACTER message, each \'English || 한국어\'"]' : '';
     const preferenceText = settings.cardLinkEnabled && settings.nextBeatHints ? cardLinkPreferenceText() : '';
     const preferenceRule = preferenceText
         ? '\n- "next" should draw on the CHARACTER PREFERENCES given in the user message where they fit the current scene; they are inspiration only, never a checklist.'
         : '';
-    const stageRule = slowBurnEnabled
-        ? '\n- "stage" is the scene\'s slow-burn progression as an integer: 1 tension/atmosphere, 2 gaze/words/proximity, 3 first meaningful exchange/contact, 4 deepening connection/reactions, 5 turning point/decisive escalation, 6 resolution or conclusion permitted.'
-        : '';
+    const fields = [
+        '"scene_type":"general"',
+        '"location":"short English phrase || 짧은 한국어 구"',
+        '"time":"current time or time context, English || 한국어"',
+        '"environment":"scene-relevant environmental state, English || 한국어"',
+        '"important_objects":{"object name":"current location/condition, English || 한국어"}',
+        '"characters":{"name":{"appearance":"current appearance/clothing, English || 한국어","position":"current posture/position, English || 한국어","holding":"currently holding/carrying, English || 한국어","condition":"current physical condition, English || 한국어"}}',
+    ];
+    if (settings.dialogueFlow) fields.push('"dialogue_flow":{"topic":"current topic, English || 한국어","last_question":"latest unanswered direct CHARACTER question, English || 한국어","new_facts":["0-3 newly established facts, each English || 한국어"]}');
+    if (settings.dialogueBeatGuard) fields.push('"dialogue_beats":["0-3 dialogue intents from the final CHARACTER message, each English || 한국어"]');
+    if (settings.repeatGuard) fields.push('"acts":["1-4 significant beats from the final CHARACTER message only, each English || 한국어"]');
+    fields.push('"intensity":0');
+    if (settings.slowBurnEnabled) fields.push('"stage":1');
+    if (settings.nextBeatHints) fields.push('"next":["2-3 fresh beats the scene could move to next, each English || 한국어"]');
+
     const system = `You are a scene-state tracker for a fiction roleplay log. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.
 
 Schema:
-{"location":"short English phrase || 짧은 한국어 구","characters":{"name":{"appearance":"current appearance/notable state, English || 한국어","position":"current posture/position, English || 한국어","holding":"what they are currently holding/carrying, English || 한국어"}}${dialogueSchema},"acts":["2-4 significant beats from the most recent CHARACTER message only, each 'English || 한국어'"],"intensity":0${stageSchema},"next":["2-3 fresh beats the scene could move to next, each 'English || 한국어'"]}
+{${fields.join(',')}}
 
 Rules:
 - Every string value is a bilingual pair: concise English first, then " || ", then natural Korean.
-- Describe the state at the END of the log, factually and concisely. Note significant appearance changes explicitly.
-- "acts" must cover only the final CHARACTER message. List ONLY substantive beats (plot, relationship, or emotional developments); skip mundane logistics like snacks, drinks, blankets, or remote controls.
-${dialogueGuard ? '- "dialogue_beats" must list 0-3 conversational intents/functions from spoken CHARACTER dialogue in the final CHARACTER message only. Describe the purpose, not exact wording or quotations. Use [] if there is no spoken dialogue.\n' : ''}${INTENSITY_SCALE_LINES.join('\n')}${stageRule}
-- "next" must not repeat anything already listed in "acts".${preferenceRule}
+- Describe the state at the END of the log, factually and concisely. Include current time context, environment, scene-relevant object states, every present character, and significant physical-condition changes.
+- Classify "scene_type" as exactly one of: general, daily, conversation, romance, conflict, action, investigation.
+- Keep the established scene type unless the dominant kind of scene genuinely changes; incidental dialogue or a small action alone is not a type change.
+- Track only important objects whose location or condition matters for scene continuity; do not inventory ordinary background items.
+${settings.repeatGuard ? '- "acts" must cover only substantive new developments in the final CHARACTER message. Skip routine logistics and tiny housekeeping actions.\n' : ''}${settings.dialogueBeatGuard ? '- "dialogue_beats" must list 0-3 conversational intents/functions from spoken CHARACTER dialogue in the final CHARACTER message only. Describe purpose, not wording. Use [] if there is no spoken dialogue.\n' : ''}${settings.dialogueFlow ? '- "dialogue_flow" tracks only the current topic, the latest direct CHARACTER question still awaiting an answer, and facts newly established in the final CHARACTER message. Do not create an unresolved plot, promise, goal, or clue list.\n' : ''}${INTENSITY_SCALE_LINES.join('\n')}
+${settings.slowBurnEnabled ? '- "stage" is an integer 1-6 using the reported scene type: setup, engagement, first meaningful development, deepening/complication, decisive turning point, resolution/transition permitted.\n' : ''}${settings.nextBeatHints ? '- "next" must not repeat anything already listed in "acts" and must fit the current scene type and stage.' : ''}${preferenceRule}
 - Include every present character. Use the exact names from the log.
 - If something is unknown, use an empty string. Return the JSON object only.`;
     const user = `${preferenceText ? `CHARACTER PREFERENCES (reference for "next" only):\n${preferenceText}\n\n` : ''}Log excerpt (oldest first):\n\n${buildRefineInput()}`;
@@ -1297,7 +1494,7 @@ async function runRefine({ manual = false } = {}) {
 
 function scheduleAutoRefine() {
     const settings = getSettings();
-    // 무장 상태에서만 자동 보정 — 대기(감시) 중 태그가 없는 건 정상이므로 호출 낭비 금지
+    // 개입 상태에서만 자동 보정 — 꺼진 채팅에서 호출 낭비 금지
     if (!settings.autoRefine || !isFullyArmed()) return;
     clearTimeout(refineTimer);
     refineTimer = setTimeout(() => { void runRefine(); }, 900);
@@ -1353,40 +1550,6 @@ function handleIncomingMessage(index) {
         meta.slowBurnRecoveryPending = false;
         saveChatMeta();
         toastr.success(`“${targetProgress.target}” ${targetProgress.requiredTurns}회 진행을 채웠어요. 다음 AI 답변부터는 전환할 수 있어요.`, '🫧또또SFW');
-    }
-    // 강도 자동 무장/해제 (히스테리시스: 켜짐 5↑, 꺼짐 2↓) — 'auto' 모드 전용 ('always' 모드는 채팅 토글이 곧 개입)
-    if (state?.intensity !== null && state?.intensity !== undefined && settings.armMode === 'auto') {
-        if (!meta.autoArmed && state.intensity >= AUTO_ARM_ON) {
-            meta.autoArmed = true;
-            saveChatMeta();
-            toastr.info(`장면 강도 ${state.intensity}/10 — 연속성 개입을 시작해요.`, '🫧또또SFW');
-            // 감시 모드에서는 강도만 수집했으므로, 무장 직후 보조 AI로 전체 상태를 백필
-            if (settings.autoRefine) {
-                clearTimeout(refineTimer);
-                refineTimer = setTimeout(() => { void runRefine(); }, 400);
-            }
-        } else if (meta.autoArmed && state.intensity <= AUTO_ARM_OFF) {
-            const prematureSlowBurnEnd = settings.slowBurnEnabled
-                && meta.slowBurnSessionActive
-                && !slowBurnProgress(settings).canConclude;
-            if (prematureSlowBurnEnd) {
-                const firstDetection = !meta.slowBurnRecoveryPending;
-                meta.slowBurnRecoveryPending = true;
-                meta.autoArmed = true;
-                meta.bridgePending = false;
-                saveChatMeta();
-                if (firstDetection) toastr.warning('최소 턴 전에 장면 종료를 감지했어요. 개입을 유지하고 다음 응답에서 장면을 이어가게 해요.', '🫧또또SFW');
-            } else {
-                meta.autoArmed = false;
-                meta.bridgePending = Boolean(settings.exitBridge); // 다음 생성 한 번은 장면 마무리 지시
-                resetSlowBurnSession(meta);
-                saveChatMeta();
-                toastr.info(`장면 강도 ${state.intensity}/10 — 개입을 해제하고 대기로 돌아가요.`, '🫧또또SFW');
-            }
-        } else if (state.intensity > AUTO_ARM_OFF && meta.slowBurnRecoveryPending) {
-            meta.slowBurnRecoveryPending = false;
-            saveChatMeta();
-        }
     }
     if (changed) {
         rerenderMessage(index, message);
@@ -1496,7 +1659,8 @@ function renderSlowBurnPanel(settings) {
             : targetProgress.target
                 ? `“${targetProgress.target}”을(를) ${targetProgress.requiredTurns}회 진행할 준비가 됐어요.`
                 : '장면과 횟수를 정하면 다음 AI 답변부터 정확히 그 횟수만큼 유지해요.';
-    const stage = SLOW_BURN_STAGES[progress.stage];
+    const sceneType = effectiveState().state?.sceneType || 'general';
+    const stage = sceneTypeDef(sceneType).stages[progress.stage];
     const sourceLabel = {
         manual: '수동 선택',
         reported: 'AI 단계 감지',
@@ -1504,7 +1668,7 @@ function renderSlowBurnPanel(settings) {
         default: '초기 단계',
     }[progress.source] ?? '자동 감지';
 
-    element('tsf-slow-burn-stage').textContent = `${progress.stage}단계 · ${stage.ko}`;
+    element('tsf-slow-burn-stage').textContent = `${sceneTypeDef(sceneType).ko} · ${progress.stage}단계 · ${stage.ko}`;
     const sessionText = `활성화 후 ${Math.min(progress.sessionTurns, progress.requiredTurns)}/${progress.requiredTurns}턴`;
     const stageText = `현재 단계 ${Math.min(progress.turns, progress.requiredTurns)}/${progress.requiredTurns}턴`;
     element('tsf-slow-burn-progress').textContent = progress.locked
@@ -1589,13 +1753,43 @@ function renderStatePanel() {
     if (state?.intensity !== null && state?.intensity !== undefined) {
         intensityBadge.hidden = false;
         intensityBadge.textContent = `📈 ${state.intensity}/10`;
-        intensityBadge.classList.toggle('is-hot', state.intensity >= AUTO_ARM_ON);
+        intensityBadge.classList.toggle('is-hot', state.intensity >= INTENSITY_HIGH);
     } else {
         intensityBadge.hidden = true;
     }
 
     const locationInput = element('tsf-state-location');
     if (document.activeElement !== locationInput) locationInput.value = biText(state?.location);
+
+    const sceneTypeInput = element('tsf-state-scene-type');
+    if (document.activeElement !== sceneTypeInput) sceneTypeInput.value = state?.sceneType || 'general';
+    const timeInput = element('tsf-state-time');
+    if (document.activeElement !== timeInput) timeInput.value = biText(state?.time);
+    const environmentInput = element('tsf-state-environment');
+    if (document.activeElement !== environmentInput) environmentInput.value = biText(state?.environment);
+
+    const objectList = element('tsf-object-list');
+    objectList.replaceChildren();
+    const importantObjects = state?.importantObjects ?? {};
+    for (const [name, objectState] of Object.entries(importantObjects)) {
+        const row = document.createElement('label');
+        row.className = 'tsf-char-field';
+        const caption = document.createElement('span');
+        caption.textContent = name;
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'text_pole';
+        input.value = biText(objectState);
+        input.addEventListener('change', () => {
+            applyManualEdit((draft) => {
+                if (!draft.importantObjects || typeof draft.importantObjects !== 'object') draft.importantObjects = {};
+                draft.importantObjects[name] = input.value;
+            });
+        });
+        row.append(caption, input);
+        objectList.append(row);
+    }
+    element('tsf-object-empty').hidden = Object.keys(importantObjects).length > 0;
 
     const list = element('tsf-char-list');
     list.replaceChildren();
@@ -1606,7 +1800,7 @@ function renderStatePanel() {
         const title = document.createElement('strong');
         title.textContent = name;
         row.append(title);
-        for (const [field, label] of [['appearance', '외형·복장'], ['position', '자세·위치'], ['holding', '소지품']]) {
+        for (const [field, label] of [['appearance', '외형·복장'], ['position', '자세·위치'], ['holding', '소지품'], ['condition', '신체 상태']]) {
             const wrap = document.createElement('label');
             wrap.className = 'tsf-char-field';
             const caption = document.createElement('span');
@@ -1617,7 +1811,7 @@ function renderStatePanel() {
             input.value = biText(info[field]);
             input.addEventListener('change', () => {
                 applyManualEdit((draft) => {
-                    if (!draft.characters[name]) draft.characters[name] = { appearance: '', position: '', holding: '' };
+                    if (!draft.characters[name]) draft.characters[name] = { appearance: '', position: '', holding: '', condition: '' };
                     draft.characters[name][field] = input.value;
                 });
             });
@@ -1653,8 +1847,8 @@ function renderStatePanel() {
             actsList.append(chip);
         }
     }
-    element('tsf-acts-empty').hidden = rows.length > 0;
-    element('tsf-acts-summary').textContent = `최근 ${settings.repeatWindow}턴 기준`;
+    element('tsf-acts-empty').hidden = !settings.repeatGuard || rows.length > 0;
+    element('tsf-acts-summary').textContent = settings.repeatGuard ? `최근 ${settings.repeatWindow}턴 기준` : '기능 꺼짐';
 
     // 개발자 실험실: 최근 대사 의도 목록
     const dialogueSection = element('tsf-dialogue-section');
@@ -1688,6 +1882,25 @@ function renderStatePanel() {
         }
     }
     element('tsf-dialogue-empty').hidden = dialogueRows.length > 0;
+
+    const dialogueFlowSection = element('tsf-dialogue-flow-section');
+    dialogueFlowSection.hidden = !settings.dialogueFlow;
+    if (settings.dialogueFlow) {
+        const topicInput = element('tsf-state-topic');
+        const questionInput = element('tsf-state-question');
+        if (document.activeElement !== topicInput) topicInput.value = biText(state?.dialogueFlow?.topic);
+        if (document.activeElement !== questionInput) questionInput.value = biText(state?.dialogueFlow?.lastQuestion);
+        const factsList = element('tsf-new-facts-list');
+        factsList.replaceChildren();
+        const facts = state?.dialogueFlow?.newFacts ?? [];
+        for (const fact of facts) {
+            const chip = document.createElement('span');
+            chip.className = 'tsf-act-chip';
+            chip.textContent = biText(fact);
+            factsList.append(chip);
+        }
+        element('tsf-new-facts-empty').hidden = facts.length > 0;
+    }
 
     // 다음 전개 후보
     const nextList = element('tsf-next-list');
@@ -1829,9 +2042,15 @@ function updateUi() {
 
         element('tsf-enabled').checked = Boolean(settings.enabled);
         element('tsf-chat-enabled').checked = Boolean(meta?.enabled);
+        element('tsf-feature-preset').value = String(settings.featurePreset);
+        element('tsf-repeat-guard').checked = Boolean(settings.repeatGuard);
+        element('tsf-dialogue-flow').checked = Boolean(settings.dialogueFlow);
+        element('tsf-transition-guard').checked = Boolean(settings.transitionGuard);
         element('tsf-repeat-window').value = String(settings.repeatWindow);
+        element('tsf-repeat-window').disabled = !settings.repeatGuard;
         element('tsf-repeat-window-value').textContent = `${settings.repeatWindow}턴`;
         element('tsf-max-banned').value = String(settings.maxBannedActs);
+        element('tsf-max-banned').disabled = !settings.repeatGuard;
         element('tsf-max-banned-value').textContent = `${settings.maxBannedActs}개`;
         element('tsf-pace-mode').value = String(settings.paceMode);
         element('tsf-pace-mode').disabled = Boolean(settings.slowBurnEnabled);
@@ -1846,7 +2065,6 @@ function updateUi() {
         element('tsf-style-length').value = String(settings.styleLength);
         element('tsf-style-balance').value = String(settings.styleBalance);
         element('tsf-exit-bridge').checked = Boolean(settings.exitBridge);
-        element('tsf-arm-mode').value = String(settings.armMode);
         element('tsf-next-hints').checked = Boolean(settings.nextBeatHints);
         element('tsf-dialogue-guard').checked = Boolean(settings.dialogueBeatGuard);
         element('tsf-dialogue-window').value = String(settings.dialogueWindow);
@@ -1855,17 +2073,13 @@ function updateUi() {
         element('tsf-auto-refine').checked = Boolean(settings.autoRefine);
 
         const armed = isSupervising();
-        const intensity = effectiveState().state?.intensity;
-        const intensityText = intensity !== null && intensity !== undefined ? ` (강도 ${intensity}/10)` : '';
         element('tsf-header-status').textContent = !settings.enabled
             ? '꺼져 있어요'
             : !meta?.enabled
                 ? '이 채팅에서는 쉬는 중'
                 : refineRunning
                     ? '보조 AI 분석 중…'
-                    : settings.armMode === 'auto'
-                        ? (meta?.autoArmed ? `개입 중이에요${intensityText}` : `강도를 감시하는 중이에요${intensityText}`)
-                        : '장면을 지켜보는 중이에요';
+                    : '장면을 지켜보는 중이에요';
 
         element('tsf-refine').disabled = refineRunning;
         element('tsf-force-arm-label').textContent = isFullyArmed() ? '개입 해제' : '지금 개입';
@@ -1888,9 +2102,9 @@ function bindSetting(id, key, parser = (value) => value, after = null) {
         const value = target.type === 'checkbox' ? target.checked : target.value;
         const settings = getSettings();
         settings[key] = parser(value);
+        if (typeof after === 'function') after(settings);
         saveSettings();
         if (!settings.enabled) clearInjectedPrompt();
-        if (typeof after === 'function') after(settings);
         updateUi();
     });
 }
@@ -1915,19 +2129,26 @@ function bindUi() {
         if (settings.enabled && settings.slowBurnEnabled && isFullyArmed()) startSlowBurnSessionIfNeeded();
     };
     bindSetting('tsf-enabled', 'enabled', Boolean, syncSlowBurnSession);
-    bindSetting('tsf-arm-mode', 'armMode', String, (settings) => {
-        // 수동으로 전환하면 자동 무장 상태는 리셋
-        if (settings.armMode === 'always') {
-            const meta = getChatMeta(false);
-            if (meta) {
-                meta.autoArmed = false;
-                resetSlowBurnSession(meta);
-                saveChatMeta();
-            }
+    element('tsf-feature-preset').addEventListener('change', () => {
+        const preset = element('tsf-feature-preset').value;
+        const settings = getSettings();
+        if (preset === 'custom') {
+            settings.featurePreset = 'custom';
+            saveSettings();
+            updateUi();
+            return;
+        } else {
+            applyFeaturePreset(settings, preset);
         }
+        saveSettings();
+        syncSlowBurnSession(settings);
+        updateUi();
     });
-    bindSetting('tsf-next-hints', 'nextBeatHints', Boolean);
-    bindSetting('tsf-dialogue-guard', 'dialogueBeatGuard', Boolean);
+    bindSetting('tsf-transition-guard', 'transitionGuard', Boolean, markFeaturePresetCustom);
+    bindSetting('tsf-repeat-guard', 'repeatGuard', Boolean, markFeaturePresetCustom);
+    bindSetting('tsf-next-hints', 'nextBeatHints', Boolean, markFeaturePresetCustom);
+    bindSetting('tsf-dialogue-guard', 'dialogueBeatGuard', Boolean, markFeaturePresetCustom);
+    bindSetting('tsf-dialogue-flow', 'dialogueFlow', Boolean, markFeaturePresetCustom);
     bindSetting('tsf-card-link', 'cardLinkEnabled', Boolean);
     element('tsf-card-link-refresh').addEventListener('click', () => {
         updateUi();
@@ -1945,6 +2166,7 @@ function bindUi() {
     });
     bindSetting('tsf-pace-mode', 'paceMode', String);
     bindSetting('tsf-slow-burn-enabled', 'slowBurnEnabled', Boolean, (settings) => {
+        markFeaturePresetCustom(settings);
         const meta = getChatMeta(false);
         if (!meta) return;
         resetSlowBurnSession(meta);
@@ -2001,6 +2223,27 @@ function bindUi() {
     element('tsf-state-location').addEventListener('change', () => {
         applyManualEdit((draft) => { draft.location = element('tsf-state-location').value; });
     });
+    element('tsf-state-scene-type').addEventListener('change', () => {
+        applyManualEdit((draft) => { draft.sceneType = element('tsf-state-scene-type').value; });
+    });
+    element('tsf-state-time').addEventListener('change', () => {
+        applyManualEdit((draft) => { draft.time = element('tsf-state-time').value; });
+    });
+    element('tsf-state-environment').addEventListener('change', () => {
+        applyManualEdit((draft) => { draft.environment = element('tsf-state-environment').value; });
+    });
+    element('tsf-state-topic').addEventListener('change', () => {
+        applyManualEdit((draft) => {
+            if (!draft.dialogueFlow || typeof draft.dialogueFlow !== 'object') draft.dialogueFlow = {};
+            draft.dialogueFlow.topic = element('tsf-state-topic').value;
+        });
+    });
+    element('tsf-state-question').addEventListener('change', () => {
+        applyManualEdit((draft) => {
+            if (!draft.dialogueFlow || typeof draft.dialogueFlow !== 'object') draft.dialogueFlow = {};
+            draft.dialogueFlow.lastQuestion = element('tsf-state-question').value;
+        });
+    });
 
     element('tsf-refine').addEventListener('click', () => { void runRefine({ manual: true }); });
     element('tsf-force-arm').addEventListener('click', forceToggleArm);
@@ -2036,6 +2279,7 @@ function bindUi() {
         }
         if (!settings.slowBurnEnabled) {
             settings.slowBurnEnabled = true;
+            settings.featurePreset = 'custom';
             saveSettings();
         }
         const meta = getChatMeta();
@@ -2247,12 +2491,21 @@ async function initializeUi() {
     const required = [
         'tsf-enabled',
         'tsf-chat-enabled',
+        'tsf-feature-preset',
+        'tsf-repeat-guard',
+        'tsf-dialogue-flow',
+        'tsf-transition-guard',
         'tsf-repeat-window',
         'tsf-pace-mode',
         'tsf-slow-burn-enabled',
         'tsf-slow-burn-stage',
         'tsf-refine',
         'tsf-state-location',
+        'tsf-state-scene-type',
+        'tsf-state-time',
+        'tsf-state-environment',
+        'tsf-state-topic',
+        'tsf-state-question',
         'tsf-dialogue-window',
         'tsf-card-link',
         'tsf-card-link-list',
