@@ -1,5 +1,26 @@
 #ttotto-sfw-settings {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
     margin: 0;
+    overflow-x: hidden;
+    overscroll-behavior-x: none;
+}
+
+#ttotto-sfw-settings .inline-drawer,
+#ttotto-sfw-settings .inline-drawer-content,
+#ttotto-sfw-settings .tsf-panel,
+#ttotto-sfw-settings .tsf-field,
+#ttotto-sfw-settings .tsf-setting-row,
+#ttotto-sfw-settings .tsf-acts-list,
+#ttotto-sfw-settings .tsf-char-row,
+#ttotto-sfw-settings .tsf-slow-burn-card,
+#ttotto-sfw-settings .tsf-slow-burn-target-box,
+#ttotto-sfw-settings .tsf-prompt-preview,
+#ttotto-sfw-settings .tsf-card-link-box {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
 }
 
 #tsf-developer-title,
@@ -73,10 +94,13 @@
     display: flex;
     gap: 6px;
     margin: 8px 0;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .ttotto-sfw-settings .tsf-tab {
     flex: 1 1 auto;
+    min-width: 0;
     border: 1px solid transparent !important;
     box-shadow: none !important;
     background: transparent !important;
@@ -104,6 +128,15 @@
     gap: 8px;
 }
 
+.ttotto-sfw-settings .tsf-section-head > div,
+.ttotto-sfw-settings .tsf-slow-burn-head > div,
+.ttotto-sfw-settings .tsf-setting-row > span,
+.ttotto-sfw-settings .tsf-act-chip > span,
+.ttotto-sfw-settings .tsf-empty > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 .ttotto-sfw-settings .tsf-section-head small {
     display: block;
     opacity: 0.7;
@@ -114,6 +147,18 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+}
+
+.ttotto-sfw-settings .tsf-field .text_pole,
+.ttotto-sfw-settings .tsf-field input,
+.ttotto-sfw-settings .tsf-field select,
+.ttotto-sfw-settings .tsf-field textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    margin-left: 0;
+    margin-right: 0;
 }
 
 .ttotto-sfw-settings .tsf-field small {
@@ -135,6 +180,10 @@
     font-size: 0.78em;
 }
 
+.ttotto-sfw-settings .tsf-setting-row > input[type="checkbox"] {
+    flex: 0 0 auto;
+}
+
 .ttotto-sfw-settings .tsf-char-list {
     display: flex;
     flex-direction: column;
@@ -152,15 +201,26 @@
 
 .ttotto-sfw-settings .tsf-char-field {
     display: grid;
-    grid-template-columns: 72px 1fr;
+    grid-template-columns: 72px minmax(0, 1fr);
     align-items: center;
     gap: 6px;
     margin: 0;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .ttotto-sfw-settings .tsf-char-field > span {
     font-size: 0.8em;
     opacity: 0.75;
+}
+
+.ttotto-sfw-settings .tsf-char-field .text_pole {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    margin-left: 0;
+    margin-right: 0;
 }
 
 .ttotto-sfw-settings .tsf-acts-head {
@@ -213,6 +273,9 @@
     font-size: 0.82em;
     background: color-mix(in srgb, crimson 18%, transparent);
     border: 1px solid color-mix(in srgb, crimson 40%, transparent);
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .ttotto-sfw-settings .tsf-act-chip button {
@@ -326,6 +389,8 @@
     display: flex;
     gap: 6px;
     align-items: center;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .ttotto-sfw-settings .tsf-custom-ban-row input {
@@ -426,7 +491,20 @@
 
 .tsf-popup-body {
     overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior-x: none;
+    touch-action: pan-y;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
     padding: 8px 14px 14px;
+    -webkit-overflow-scrolling: touch;
+}
+
+.tsf-popup {
+    box-sizing: border-box;
+    min-width: 0;
 }
 
 /* 팝업 안에서는 드로어를 항상 펼침 */
