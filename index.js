@@ -14,7 +14,8 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.6';
+const EXTENSION_VERSION = '0.2.7';
+const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -389,10 +390,12 @@ function handleDeveloperTitleTap(event) {
 function getChatMeta(create = true) {
     const context = getContext();
     if (!context.chatMetadata || typeof context.chatMetadata !== 'object') return null;
+    let needsSave = false;
     if (!context.chatMetadata[CHAT_STATE_KEY]) {
         if (!create) return null;
         context.chatMetadata[CHAT_STATE_KEY] = {
-            enabled: false,
+            chatSchemaVersion: CHAT_STATE_SCHEMA_VERSION,
+            enabled: true,
             manualState: null,
             ignoredActs: [],
             autoArmed: false,
@@ -411,8 +414,17 @@ function getChatMeta(create = true) {
             nsfwDelegatedAtAssistantCount: null,
             nsfwDetectionCooldownFrom: 0,
         };
+        needsSave = true;
     }
     const meta = context.chatMetadata[CHAT_STATE_KEY];
+    const previousChatSchemaVersion = Number(meta.chatSchemaVersion) || 0;
+    // 최초 업데이트 때만 기존 채팅의 사용 토글을 기본 ON으로 맞춘다.
+    // 이후 사용자가 직접 끈 값은 chatSchemaVersion이 남아 그대로 보존된다.
+    if (previousChatSchemaVersion < CHAT_STATE_SCHEMA_VERSION) {
+        meta.enabled = true;
+        meta.chatSchemaVersion = CHAT_STATE_SCHEMA_VERSION;
+        needsSave = true;
+    }
     if (!Array.isArray(meta.ignoredActs)) meta.ignoredActs = [];
     if (!Array.isArray(meta.ignoredDialogueBeats)) meta.ignoredDialogueBeats = [];
     if (!Array.isArray(meta.customBans)) meta.customBans = [];
@@ -429,6 +441,7 @@ function getChatMeta(create = true) {
     meta.nsfwDelegatedAtAssistantCount = Number.isInteger(delegatedAt) && delegatedAt >= 0 ? delegatedAt : null;
     const cooldownFrom = Number(meta.nsfwDetectionCooldownFrom);
     meta.nsfwDetectionCooldownFrom = Number.isInteger(cooldownFrom) && cooldownFrom >= 0 ? cooldownFrom : 0;
+    if (needsSave) saveChatMeta();
     return meta;
 }
 
@@ -1520,7 +1533,7 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
     try {
         if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) return;
         const settings = getSettings();
-        const meta = getChatMeta(false);
+        const meta = getChatMeta();
         if (isSupervising() && syncNsfwSuspension()) {
             console.debug(`${LOG_PREFIX} NSFW 장면 자동 인계 — SFW 주입 생략`);
             return;
@@ -2290,7 +2303,8 @@ function updateUi() {
     if (!uiReady) return;
     try {
         const settings = getSettings();
-        const meta = getChatMeta(false);
+        // 새 채팅에서도 기본 ON 상태를 즉시 만들고 저장한다.
+        const meta = getChatMeta();
         if (meta?.enabled) syncNsfwSuspension();
         const nsfwSuspended = Boolean(meta?.nsfwSuspended);
 
