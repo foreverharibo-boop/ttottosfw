@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.19';
+const EXTENSION_VERSION = '0.2.21';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -316,7 +316,7 @@ function diagnosticText() {
         '본문·인물명·API 키 미포함 / 추가 API 호출 없음',
         '주입 등록 성공은 확장 API에 등록했다는 뜻이며, 실제 전송 프롬프트 포함까지 증명하지 않습니다.',
         '수신/관찰 기록은 생성 도중에도 남을 수 있습니다. 생성 종료 뒤 결과를 확인하세요.',
-        `실행=${runtimeActive} 전체사용=${Boolean(settings.enabled)} 채팅사용=${Boolean(meta?.enabled)} 자동보정=${Boolean(settings.autoRefine)} NSFW대기=${Boolean(meta?.nsfwSuspended)}`,
+        `실행=${runtimeActive} 전체사용=${Boolean(settings.enabled)} 채팅사용=${Boolean(meta?.enabled)} 자동보정=${Boolean(settings.autoRefine)} NSFW대기=${Boolean(meta?.nsfwSuspended)} quiet처리=기존주입유지`,
         `최신 AI 메시지=${target?.index ?? '없음'} 스와이프=${target?.swipeIndex ?? '없음'} 최신 원문과 일치하는 저장 상태=${fresh}`,
         `마지막 주입 기록=${injection ? `${injection.at} v${injection.version} ${injection.result}` : '없음 (업데이트 후 새 답변 생성 필요)'}`,
         '--- 최근 기록 (최대 80개, 시각은 UTC) ---',
@@ -1785,13 +1785,13 @@ function onGenerationStarted(type, options, dryRun) {
     if (dryRun) return;
     const normalized = normalizeGenerationType(type);
     if (normalized === 'quiet') {
-        recordDiagnostic('숨은 생성 분류', 'quiet · 상태 지시 주입 제외');
+        recordDiagnostic('숨은 생성 분류', 'quiet · 기존 주입 유지 (삭제·교체 없음)');
         recordDiagnostic('숨은 생성 옵션', `quietToLoud=${Boolean(options?.quietToLoud)}`);
     }
     if (ALLOWED_GENERATION_TYPES.has(normalized)) {
         recordDiagnostic('조기 주입', '생성 시작 이벤트에서 상태 지시 등록 시도');
         prepareSceneInjection({ consumeBridge: false });
-    } else if (normalized === 'quiet' || normalized === 'impersonate') {
+    } else if (normalized === 'impersonate') {
         clearInjectedPrompt();
     }
 }
@@ -1799,10 +1799,12 @@ function onGenerationStarted(type, options, dryRun) {
 globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationInterceptor(_chat, _contextSize, _abort, type) {
     const generationType = normalizeGenerationType(type);
     recordDiagnostic('주입 시작', generationTypeDiagnostic(type));
+    if (generationType === 'quiet') {
+        recordDiagnostic('주입 유지', 'quiet · 기존 주입 유지 (삭제·교체 없음)');
+        return;
+    }
     if (!ALLOWED_GENERATION_TYPES.has(generationType)) {
-        if (generationType === 'quiet' || generationType === 'impersonate') {
-            // Known auxiliary/user-role generations must not inherit the RP
-            // state-report instruction. The next RP request rebuilds it.
+        if (generationType === 'impersonate') {
             clearInjectedPrompt();
             recordDiagnostic('주입 생략', `${generationType}: 보조/유저역 생성에 상태 지시가 섞이지 않도록 제거`);
         } else {
