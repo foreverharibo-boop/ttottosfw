@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.9';
+const EXTENSION_VERSION = '0.2.10';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -164,6 +164,7 @@ const NSFW_LOCAL_WINDOW = 2;
 const NSFW_LOCAL_THRESHOLDS = Object.freeze({ high: 3, normal: 4, low: 7 });
 const NSFW_COLD_STREAK = 2;
 const NSFW_STATE_TAG_REGEX = /<scene_state\b[^>]*>[\s\S]*?<\/scene_state>/gi;
+const NSFW_MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const NSFW_LEXICON = Object.freeze([
     // 신체 명칭이나 직전 장면의 잔여물만으로는 인계하지 않는다. 현재 진행 중인 행위만 강한 신호로 본다.
     { re: /삽입(?:하|했|해|되|된|되는|중)|박아\s*넣|쑤셔\s*넣|사정(?:하|했|해|시키|하며|하는|하려)|오르가즘(?:에|을)\s*(?:도달|느끼)|성기를\s*(?:넣|밀어\s*넣|움직|빨|핥)|질\s*(?:안|속)에\s*(?:넣|박)|penetrat(?:e|ed|ing)|thrust(?:ed|ing|s)?\s+(?:inside|into|against)|orgasm(?:ed|ing)|came\s+(?:inside|over|on)|coming\s+(?:inside|in\s+her|in\s+him)/gi, weight: 4 },
@@ -541,6 +542,73 @@ function localNsfwColdStreak() {
         && recent.every((message) => localNsfwScore(message.mes) === 0);
 }
 
+function latestNsfwSnapshot() {
+    const messages = assistantMessages();
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i];
+        const store = message?.extra?.[NSFW_MESSAGE_EXTRA_KEY];
+        const snapshot = store?.swipes?.[String(currentSwipeIndex(message))];
+        if (snapshot?.state) return { message, state: snapshot.state };
+    }
+    return null;
+}
+
+function infoPanelField(text, englishKey, koreanKey) {
+    const source = String(text ?? '');
+    const blocks = [...source.matchAll(/<Info_panel>([\s\S]*?)<\/Info_panel>/gi)].map((match) => match[1]);
+    let en = '';
+    let ko = '';
+    for (const block of blocks) {
+        const english = block.match(new RegExp(`\\[${englishKey}\\s*:\\s*([^\\]\\r\\n]+)`, 'i'));
+        const korean = block.match(new RegExp(`\\[${koreanKey}\\s*:\\s*([^\\]\\r\\n]+)`));
+        if (english?.[1]) en = english[1].trim();
+        if (korean?.[1]) ko = korean[1].trim();
+    }
+    if (!en && !ko) return '';
+    return { en: en || ko, ko: ko || en };
+}
+
+function importNsfwStateForResume() {
+    const found = latestNsfwSnapshot();
+    if (!found) return null;
+    const source = found.state;
+    const characters = {};
+    for (const [name, info] of Object.entries(source.characters ?? {})) {
+        characters[name] = {
+            appearance: info?.clothing,
+            position: info?.position,
+            holding: info?.contact,
+            condition: '',
+        };
+    }
+    const state = sanitizeState({
+        scene_type: 'general',
+        location: source.location,
+        time: infoPanelField(found.message?.mes, 'Date', '날짜'),
+        environment: infoPanelField(found.message?.mes, 'Weather', '날씨'),
+        characters,
+        acts: source.acts,
+        dialogue_beats: source.dialogueBeats,
+        intensity: Number.isFinite(Number(source.heat)) ? Number(source.heat) : 0,
+        next: source.next,
+    });
+    if (!state) return null;
+    const at = Date.now();
+    const store = getMessageStore(found.message);
+    store.swipes[String(currentSwipeIndex(found.message))] = { state, at };
+    persistChat();
+    return { state, at };
+}
+
+function scheduleResumeRefine() {
+    if (!getSettings().autoRefine) return;
+    clearTimeout(refineTimer);
+    refineTimer = setTimeout(() => {
+        const meta = getChatMeta(false);
+        if (meta?.nsfwResumePending && !meta.nsfwSuspended) void runRefine();
+    }, 1200);
+}
+
 function syncNsfwSuspension({ notify = false } = {}) {
     const meta = getChatMeta(false);
     if (!meta?.enabled) return false;
@@ -549,6 +617,17 @@ function syncNsfwSuspension({ notify = false } = {}) {
     const delegated = nsfwExtensionOwnsScene();
     const nsfwMeta = getContext().chatMetadata?.[NSFW_CHAT_STATE_KEY];
     const immediateHandoff = Boolean(nsfwMeta?.sfwImmediateHandoff);
+    // 구버전이 이미 대기는 풀었지만 nsfw-resume만 남긴 채팅도 업데이트 즉시 복구한다.
+    if (!delegated && !meta.nsfwSuspended && meta.nsfwResumePending) {
+        const imported = importNsfwStateForResume();
+        if (imported) {
+            meta.nsfwResumePending = false;
+            meta.manualState = { state: imported.state, at: imported.at, source: 'nsfw-handoff' };
+            saveChatMeta();
+        } else {
+            scheduleResumeRefine();
+        }
+    }
     const assistantCount = assistantMessages().length;
     if (delegated && meta.nsfwDelegatedAtAssistantCount !== assistantCount) {
         meta.nsfwDelegatedAtAssistantCount = assistantCount;
@@ -577,11 +656,15 @@ function syncNsfwSuspension({ notify = false } = {}) {
         if (notify) toastr.info('NSFW 장면을 감지해 또또SFW는 잠시 대기해요.', '🫧또또SFW');
     } else if (!shouldSuspend && meta.nsfwSuspended) {
         meta.nsfwSuspended = false;
-        meta.nsfwResumePending = true;
+        const imported = importNsfwStateForResume();
+        meta.nsfwResumePending = !imported;
         meta.nsfwDelegatedAtAssistantCount = null;
         meta.nsfwDetectionCooldownFrom = Array.isArray(getContext().chat) ? getContext().chat.length : 0;
-        meta.manualState = null;
+        meta.manualState = imported
+            ? { state: imported.state, at: imported.at, source: 'nsfw-handoff' }
+            : null;
         saveChatMeta();
+        if (!imported) scheduleResumeRefine();
         if (notify) toastr.info('장면이 잦아들어 또또SFW가 다시 개입해요.', '🫧또또SFW');
     }
     return Boolean(meta.nsfwSuspended);
