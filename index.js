@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.14';
+const EXTENSION_VERSION = '0.2.15';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -269,6 +269,9 @@ let eventsRegistered = false;
 let refineRunning = false;
 let refineAbortController = null;
 let refineTimer = null;
+let activeRefineTarget = null;
+let queuedRefineTarget = null;
+let lastAutoRefineTarget = null;
 const postGenerationTimers = new Set();
 let messageObserverTimer = null;
 let lastObservedMessageKey = '';
@@ -608,12 +611,7 @@ function importNsfwStateForResume() {
 }
 
 function scheduleResumeRefine() {
-    if (!getSettings().autoRefine) return;
-    clearTimeout(refineTimer);
-    refineTimer = setTimeout(() => {
-        const meta = getChatMeta(false);
-        if (meta?.nsfwResumePending && !meta.nsfwSuspended) void runRefine();
-    }, 1200);
+    scheduleAutoRefine();
 }
 
 function syncNsfwSuspension({ notify = false } = {}) {
@@ -1889,18 +1887,23 @@ async function runRefine({ manual = false } = {}) {
 
     const target = latestAssistantTarget();
     if (!target) return false;
+    clearTimeout(refineTimer);
+    refineTimer = null;
+    queuedRefineTarget = null;
     refineRunning = true;
-    refineAbortController?.abort();
-    refineAbortController = new AbortController();
+    activeRefineTarget = target;
+    lastAutoRefineTarget = target;
+    const controller = new AbortController();
+    refineAbortController = controller;
     updateUi();
 
     try {
-        const response = await requestRefine(refineAbortController.signal);
+        const response = await awaitRefineResponse(controller.signal);
+        if (controller.signal.aborted || !runtimeActive) return false;
         const state = parseRefineResponse(response);
         const currentTarget = latestAssistantTarget();
-        if (!currentTarget || currentTarget.message !== target.message
-            || currentTarget.swipeIndex !== target.swipeIndex
-            || currentTarget.signature !== target.signature) {
+        if (!sameRefineTarget(currentTarget, target)) {
+            queuedRefineTarget = currentTarget;
             console.debug(`${LOG_PREFIX} 보정 중 최신 답변이 바뀌어 이전 분석 결과를 폐기합니다.`);
             return false;
         }
@@ -1927,25 +1930,76 @@ async function runRefine({ manual = false } = {}) {
         if (manual) toastr.success('보조 AI가 장면 상태를 다시 잡았어요.', '🫧또또SFW');
         return true;
     } catch (error) {
-        if (error?.name === 'AbortError') return false;
+        if (error?.name === 'AbortError') {
+            if (sameRefineTarget(lastAutoRefineTarget, target)) lastAutoRefineTarget = null;
+            return false;
+        }
         console.error(`${LOG_PREFIX} 보정 분석 실패`, error);
         if (manual) toastr.error(`보정 분석 실패: ${error?.message ?? error}`, '🫧또또SFW');
         return false;
     } finally {
         refineRunning = false;
         refineAbortController = null;
+        activeRefineTarget = null;
         if (runtimeActive) updateUi();
+        if (queuedRefineTarget) scheduleAutoRefine();
     }
+}
+
+function sameRefineTarget(left, right) {
+    return Boolean(left && right && left.message === right.message
+        && left.swipeIndex === right.swipeIndex
+        && left.contentSignature === right.contentSignature);
+}
+
+// Some providers ignore AbortSignal. Release our queue immediately on abort;
+// their eventual response must never commit an obsolete snapshot.
+function awaitRefineResponse(signal) {
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            const error = new Error('Scene analysis cancelled');
+            error.name = 'AbortError';
+            reject(error);
+        };
+        if (signal.aborted) return onAbort();
+        signal.addEventListener('abort', onAbort, { once: true });
+        Promise.resolve().then(() => {
+            if (signal.aborted) { onAbort(); return; }
+            return requestRefine(signal);
+        }).then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    });
 }
 
 function scheduleAutoRefine() {
     const settings = getSettings();
     // 개입 상태에서만 자동 보정 — 꺼진 채팅에서 호출 낭비 금지
-    if (!settings.autoRefine || !isFullyArmed()) return;
+    if (!runtimeActive || !settings.autoRefine || !isFullyArmed()) {
+        queuedRefineTarget = null;
+        return;
+    }
+    const target = latestAssistantTarget();
+    if (!target) return;
+    if (refineRunning && sameRefineTarget(target, activeRefineTarget)
+        && !refineAbortController?.signal.aborted) return;
+    // Duplicate render/end events must not retry the same failed response
+    // indefinitely. Manual analysis remains available for an explicit retry.
+    if (!refineRunning && sameRefineTarget(target, lastAutoRefineTarget)) {
+        queuedRefineTarget = null;
+        return;
+    }
+    if (refineTimer && sameRefineTarget(target, queuedRefineTarget)) return;
     clearTimeout(refineTimer);
-    // 이전 답변을 분석 중이었다면 오래된 결과가 최신 상태를 덮지 않게 중단하고 다시 예약한다.
-    if (refineRunning) refineAbortController?.abort();
-    refineTimer = setTimeout(() => { void runRefine(); }, 900);
+    refineTimer = null;
+    queuedRefineTarget = target;
+    if (refineRunning) {
+        refineAbortController?.abort();
+        return; // runRefine.finally drains the latest queued target.
+    }
+    refineTimer = setTimeout(() => {
+        refineTimer = null;
+        queuedRefineTarget = null;
+        if (runtimeActive && getSettings().autoRefine && isFullyArmed()) void runRefine();
+    }, 900);
 }
 
 function clearPostGenerationTimers() {
@@ -1968,10 +2022,9 @@ function schedulePostGenerationHarvest(index) {
 function observeLatestMessage() {
     if (!runtimeActive) return;
     const target = latestAssistantTarget();
-    const key = target?.signature ?? '';
+    const key = target ? `${target.index}:${target.contentSignature}` : '';
     if (!key || key === lastObservedMessageKey) return;
     lastObservedMessageKey = key;
-    if (refineRunning) refineAbortController?.abort();
     handleIncomingMessage(target.index);
 }
 
@@ -3092,6 +3145,9 @@ function registerEvents() {
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
         clearTimeout(refineTimer);
+        refineTimer = null;
+        queuedRefineTarget = null;
+        lastAutoRefineTarget = null;
         clearPostGenerationTimers();
         lastObservedMessageKey = '';
         refineAbortController?.abort();
@@ -3135,6 +3191,9 @@ export function onEnable() {
 export function onDisable() {
     runtimeActive = false;
     clearTimeout(refineTimer);
+    refineTimer = null;
+    queuedRefineTarget = null;
+    lastAutoRefineTarget = null;
     clearPostGenerationTimers();
     stopMessageObserver();
     refineAbortController?.abort();
@@ -3151,6 +3210,9 @@ export function onDisable() {
 
 export function onClean() {
     clearTimeout(refineTimer);
+    refineTimer = null;
+    queuedRefineTarget = null;
+    lastAutoRefineTarget = null;
     clearPostGenerationTimers();
     stopMessageObserver();
     refineAbortController?.abort();
