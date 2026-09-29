@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.10';
+const EXTENSION_VERSION = '0.2.11';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -269,6 +269,7 @@ let eventsRegistered = false;
 let refineRunning = false;
 let refineAbortController = null;
 let refineTimer = null;
+const postGenerationTimers = new Set();
 let popupOpen = false;
 let settingsHomeParent = null;
 let developerTapCount = 0;
@@ -1841,6 +1842,23 @@ function scheduleAutoRefine() {
     refineTimer = setTimeout(() => { void runRefine(); }, 900);
 }
 
+function clearPostGenerationTimers() {
+    for (const timer of postGenerationTimers) clearTimeout(timer);
+    postGenerationTimers.clear();
+}
+
+// ST 버전·번역 확장 순서에 따라 생성 종료가 실제 메시지 추가보다 먼저 올 수 있다.
+// 렌더·편집 뒤에도 최신 메시지를 다시 확인하고, 자동 보정 호출은 마지막 한 번으로 합친다.
+function schedulePostGenerationHarvest(index) {
+    for (const delay of [0, 350, 1200]) {
+        const timer = setTimeout(() => {
+            postGenerationTimers.delete(timer);
+            handleIncomingMessage(index);
+        }, delay);
+        postGenerationTimers.add(timer);
+    }
+}
+
 // ───────────────────────── 메시지 이벤트 처리 ─────────────────────────
 
 function messageEntryByIndex(index) {
@@ -2936,16 +2954,16 @@ function registerEvents() {
         registeredEventHandlers.push({ event, handler });
     };
 
-    listen('MESSAGE_RECEIVED', (index) => handleIncomingMessage(index));
-    // 스와이프 보험: ST 버전에 따라 스와이프 생성 후 MESSAGE_RECEIVED가 안 오는 경우를 이중으로 잡는다
-    listen('GENERATION_ENDED', () => handleIncomingMessage());
-    listen('MESSAGE_SWIPED', (index) => handleIncomingMessage(index));
-    // 편집된 본문만으로 제거된 상태 태그를 재구성할 수 없으므로 기존 스냅샷은 유지한다.
-    // 편집 이벤트에서 보조 AI를 자동 호출하지 않아 확장의 기본 동작을 가볍게 유지한다.
-    listen('MESSAGE_EDITED', () => updateUi());
+    listen('MESSAGE_RECEIVED', (index) => schedulePostGenerationHarvest(index));
+    // 스와이프·렌더 보험: ST 버전이나 번역 확장에 따라 메시지 추가/수정 이벤트 순서가 달라질 수 있다.
+    listen('GENERATION_ENDED', () => schedulePostGenerationHarvest());
+    listen('CHARACTER_MESSAGE_RENDERED', (index) => schedulePostGenerationHarvest(index));
+    listen('MESSAGE_SWIPED', (index) => schedulePostGenerationHarvest(index));
+    listen('MESSAGE_EDITED', (index) => schedulePostGenerationHarvest(index));
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
         clearTimeout(refineTimer);
+        clearPostGenerationTimers();
         refineAbortController?.abort();
         clearInjectedPrompt();
         populateProfiles();
@@ -2971,6 +2989,7 @@ async function initialize() {
     getSettings();
     registerEvents();
     await initializeUi();
+    schedulePostGenerationHarvest();
     console.log(`${LOG_PREFIX} v${EXTENSION_VERSION} 로드 완료`);
 }
 
@@ -2984,6 +3003,7 @@ export function onEnable() {
 export function onDisable() {
     runtimeActive = false;
     clearTimeout(refineTimer);
+    clearPostGenerationTimers();
     refineAbortController?.abort();
     closePopup();
     removeWandButton();
@@ -2997,6 +3017,9 @@ export function onDisable() {
 }
 
 export function onClean() {
+    clearTimeout(refineTimer);
+    clearPostGenerationTimers();
+    refineAbortController?.abort();
     closePopup();
     removeWandButton();
     document.getElementById('tsf-overlay')?.remove();
