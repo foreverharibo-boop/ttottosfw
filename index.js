@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.11';
+const EXTENSION_VERSION = '0.2.12';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -270,6 +270,8 @@ let refineRunning = false;
 let refineAbortController = null;
 let refineTimer = null;
 const postGenerationTimers = new Set();
+let messageObserverTimer = null;
+let lastObservedMessageKey = '';
 let popupOpen = false;
 let settingsHomeParent = null;
 let developerTapCount = 0;
@@ -1788,6 +1790,32 @@ function parseRefineResponse(text) {
     return state;
 }
 
+function messageTextHash(text) {
+    const source = String(text ?? '');
+    let hash = 2166136261;
+    for (let i = 0; i < source.length; i++) {
+        hash ^= source.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+}
+
+function latestAssistantTarget() {
+    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+    for (let index = chat.length - 1; index >= 0; index--) {
+        const message = chat[index];
+        if (!message || message.is_user || message.is_system) continue;
+        const swipeIndex = currentSwipeIndex(message);
+        return {
+            index,
+            message,
+            swipeIndex,
+            signature: `${index}:${swipeIndex}:${String(message.mes ?? '').length}:${messageTextHash(message.mes)}`,
+        };
+    }
+    return null;
+}
+
 async function runRefine({ manual = false } = {}) {
     const settings = getSettings();
     if (!runtimeActive || refineRunning) return false;
@@ -1800,6 +1828,8 @@ async function runRefine({ manual = false } = {}) {
         return false;
     }
 
+    const target = latestAssistantTarget();
+    if (!target) return false;
     refineRunning = true;
     refineAbortController?.abort();
     refineAbortController = new AbortController();
@@ -1808,15 +1838,26 @@ async function runRefine({ manual = false } = {}) {
     try {
         const response = await requestRefine(refineAbortController.signal);
         const state = parseRefineResponse(response);
+        const currentTarget = latestAssistantTarget();
+        if (!currentTarget || currentTarget.message !== target.message
+            || currentTarget.swipeIndex !== target.swipeIndex
+            || currentTarget.signature !== target.signature) {
+            console.debug(`${LOG_PREFIX} 보정 중 최신 답변이 바뀌어 이전 분석 결과를 폐기합니다.`);
+            return false;
+        }
+        // 응답에 명시된 정보 패널은 모델의 보정 추론보다 우선한다.
+        const panelTime = infoPanelField(target.message.mes, 'Date', '날짜');
+        const panelWeather = infoPanelField(target.message.mes, 'Weather', '날씨');
+        const panelLocation = infoPanelField(target.message.mes, 'Location', '장소');
+        if (panelTime) state.time = toBi(panelTime);
+        if (panelWeather) state.environment = toBi(panelWeather);
+        if (panelLocation) state.location = toBi(panelLocation);
         const meta = getChatMeta();
         const refinedAt = Date.now();
-        // 보정 결과를 최신 AI 메시지의 현재 스와이프에도 붙여야 반복 목록과 슬로우번 체류 턴이 정상 계산된다.
-        const latestMessage = assistantMessages().at(-1);
-        if (latestMessage) {
-            const store = getMessageStore(latestMessage);
-            store.swipes[String(currentSwipeIndex(latestMessage))] = { state, at: refinedAt };
-            persistChat();
-        }
+        // 요청을 시작한 정확한 메시지·스와이프에만 결과를 붙인다.
+        const store = getMessageStore(target.message);
+        store.swipes[String(target.swipeIndex)] = { state, at: refinedAt };
+        persistChat();
         meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
         meta.nsfwResumePending = false;
         saveChatMeta();
@@ -1839,6 +1880,8 @@ function scheduleAutoRefine() {
     // 개입 상태에서만 자동 보정 — 꺼진 채팅에서 호출 낭비 금지
     if (!settings.autoRefine || !isFullyArmed()) return;
     clearTimeout(refineTimer);
+    // 이전 답변을 분석 중이었다면 오래된 결과가 최신 상태를 덮지 않게 중단하고 다시 예약한다.
+    if (refineRunning) refineAbortController?.abort();
     refineTimer = setTimeout(() => { void runRefine(); }, 900);
 }
 
@@ -1857,6 +1900,29 @@ function schedulePostGenerationHarvest(index) {
         }, delay);
         postGenerationTimers.add(timer);
     }
+}
+
+function observeLatestMessage() {
+    if (!runtimeActive) return;
+    const target = latestAssistantTarget();
+    const key = target?.signature ?? '';
+    if (!key || key === lastObservedMessageKey) return;
+    lastObservedMessageKey = key;
+    if (refineRunning) refineAbortController?.abort();
+    handleIncomingMessage(target.index);
+}
+
+function startMessageObserver() {
+    if (messageObserverTimer) return;
+    lastObservedMessageKey = '';
+    observeLatestMessage();
+    messageObserverTimer = setInterval(observeLatestMessage, 800);
+}
+
+function stopMessageObserver() {
+    if (messageObserverTimer) clearInterval(messageObserverTimer);
+    messageObserverTimer = null;
+    lastObservedMessageKey = '';
 }
 
 // ───────────────────────── 메시지 이벤트 처리 ─────────────────────────
@@ -2964,6 +3030,7 @@ function registerEvents() {
     listen('CHAT_CHANGED', () => {
         clearTimeout(refineTimer);
         clearPostGenerationTimers();
+        lastObservedMessageKey = '';
         refineAbortController?.abort();
         clearInjectedPrompt();
         populateProfiles();
@@ -2990,12 +3057,14 @@ async function initialize() {
     registerEvents();
     await initializeUi();
     schedulePostGenerationHarvest();
+    startMessageObserver();
     console.log(`${LOG_PREFIX} v${EXTENSION_VERSION} 로드 완료`);
 }
 
 export function onEnable() {
     runtimeActive = true;
     registerEvents();
+    startMessageObserver();
     if (uiReady) addWandButton();
     updateUi();
 }
@@ -3004,6 +3073,7 @@ export function onDisable() {
     runtimeActive = false;
     clearTimeout(refineTimer);
     clearPostGenerationTimers();
+    stopMessageObserver();
     refineAbortController?.abort();
     closePopup();
     removeWandButton();
@@ -3019,6 +3089,7 @@ export function onDisable() {
 export function onClean() {
     clearTimeout(refineTimer);
     clearPostGenerationTimers();
+    stopMessageObserver();
     refineAbortController?.abort();
     closePopup();
     removeWandButton();
