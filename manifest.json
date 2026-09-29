@@ -1,10 +1,10 @@
 {
   "display_name": "🫧또또SFW",
-  "loading_order": 0,
+  "loading_order": 1,
   "js": "index.js",
   "css": "style.css",
   "author": "담은",
-  "version": "0.2.7",
+  "version": "0.2.9",
   "auto_update": true,
   "minimum_client_version": "1.12.14",
   "generate_interceptor": "ttottoSfwGenerationInterceptor",

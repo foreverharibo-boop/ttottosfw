@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.7';
+const EXTENSION_VERSION = '0.2.9';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -160,19 +160,16 @@ const INTENSITY_HIGH = 5;
 // 설치되어 있지 않아도 같은 로컬 신호 감지기로 SFW 주입을 잠시 멈춘다.
 const NSFW_SETTINGS_KEY = 'ttotto-nsfw';
 const NSFW_CHAT_STATE_KEY = 'ttottoNsfw';
-const NSFW_LOCAL_WINDOW = 4;
-const NSFW_LOCAL_THRESHOLDS = Object.freeze({ high: 4, normal: 6, low: 9 });
-const NSFW_COLD_STREAK = 3;
+const NSFW_LOCAL_WINDOW = 2;
+const NSFW_LOCAL_THRESHOLDS = Object.freeze({ high: 3, normal: 4, low: 7 });
+const NSFW_COLD_STREAK = 2;
 const NSFW_STATE_TAG_REGEX = /<scene_state\b[^>]*>[\s\S]*?<\/scene_state>/gi;
 const NSFW_LEXICON = Object.freeze([
-    // 단독으로 일상 문맥에서도 흔한 entrance/climax 등은 넣지 않는다.
-    // 영어의 strip/suck/naked 같은 다의어도 아래에서 성적 문맥으로 한정한다.
-    { re: /삽입|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|성적\s*절정|thrust(?:ing|s)?|orgasm|cock|pussy|nipples?|inside\s+her|inside\s+him|sexual\s+climax/gi, weight: 3 },
+    // 신체 명칭이나 직전 장면의 잔여물만으로는 인계하지 않는다. 현재 진행 중인 행위만 강한 신호로 본다.
+    { re: /삽입(?:하|했|해|되|된|되는|중)|박아\s*넣|쑤셔\s*넣|사정(?:하|했|해|시키|하며|하는|하려)|오르가즘(?:에|을)\s*(?:도달|느끼)|성기를\s*(?:넣|밀어\s*넣|움직|빨|핥)|질\s*(?:안|속)에\s*(?:넣|박)|penetrat(?:e|ed|ing)|thrust(?:ed|ing|s)?\s+(?:inside|into|against)|orgasm(?:ed|ing)|came\s+(?:inside|over|on)|coming\s+(?:inside|in\s+her|in\s+him)/gi, weight: 4 },
     { re: /하앙|아앙|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?\s+(?:with\s+pleasure|her\s+name|his\s+name)|whimper(?:ed|ing)?\s+(?:with\s+pleasure|for\s+more)/gi, weight: 3 },
-    { re: /벗기|벗겨|탈의|알몸|나체|속옷|브래지어|팬티|지퍼를\s*내리|단추를\s*풀|침대에\s*눕히|다리\s*사이|허벅지\s*안쪽|가슴을\s*움켜|가슴을\s*쓸|undress(?:ed|ing)?\s+(?:her|him|them|himself|herself|themselves)|strip(?:ped|ping)?\s+(?:off|down|naked|her|him|them|their|his|clothes?|shirt|dress|pants|underwear)|\bnaked\b(?!\s+eyes?\b)|underwear|lick(?:ed|ing|s)?\s+(?:her|his|their|the)?\s*(?:neck|chest|breasts?|nipples?|thighs?|clit|pussy|cock|dick)|suck(?:ed|ing|s)?\s+(?:on\s+)?(?:her|his|their|the)?\s*(?:breasts?|nipples?|fingers?|clit|pussy|cock|dick)|grind(?:ed|ing|s)?\s+(?:against|on|into)|straddl(?:e|ed|ing)\s+(?:her|him|them|his|their)|between\s+(?:her|his)\s+thighs/gi, weight: 2 },
-    // 통증·공포·격한 운동에서도 나올 수 있는 신호는 단독으로 중단 기준에 도달하지 않는다.
-    { re: /신음|헐떡|핥|빨아|깨물|몸을\s*겹치|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, weight: 1 },
-    { re: /키스가\s*깊어|입술을\s*탐|혀가\s*얽|숨이\s*가빠|숨이\s*거칠|달아오|몸이\s*뜨거|열기가\s*번지|목덜미에\s*입|귓불을|허리를\s*끌어당|kiss\s+deepen|breath(?:ing)?\s+(?:hitch|ragged|heavy)|heat\s+pool|shiver(?:ed|ing)?\s+under/gi, weight: 1 },
+    { re: /(?:옷|속옷|팬티|브래지어|바지|치마)를?\s*(?:벗기|벗겨|내리)|가슴을\s*(?:움켜|주무|빨|핥)|성기를\s*(?:잡|쥐|문지)|lick(?:ed|ing|s)?\s+(?:her|his|their|the)?\s*(?:breasts?|nipples?|clit|pussy|cock|dick)|suck(?:ed|ing|s)?\s+(?:on\s+)?(?:her|his|their|the)?\s*(?:breasts?|nipples?|clit|pussy|cock|dick)|grind(?:ed|ing|s)?\s+(?:against|on|into)|straddl(?:e|ed|ing)\s+(?:her|him|them)/gi, weight: 2 },
+    { re: /키스가\s*깊어|혀가\s*얽|목덜미에\s*입|귓불을\s*(?:물|빨|핥)|kiss(?:ed|ing)?\s+(?:deeply|hungrily)|tongues?\s+(?:tangled|met)|hands?\s+(?:slid|moved)\s+(?:under|between)/gi, weight: 1 },
 ]);
 
 const REFINE_MESSAGE_CHAR_LIMIT = 12000;
@@ -465,11 +462,16 @@ function isFullyArmed() {
 
 // ───────────────────────── NSFW 장면 자동 인계 ─────────────────────────
 
+function nsfwExtensionInstalled() {
+    const settings = getContext().extensionSettings?.[NSFW_SETTINGS_KEY];
+    return Boolean(settings && typeof settings === 'object');
+}
+
 function nsfwExtensionOwnsScene() {
     const context = getContext();
     const settings = context.extensionSettings?.[NSFW_SETTINGS_KEY];
     const meta = context.chatMetadata?.[NSFW_CHAT_STATE_KEY];
-    if (!settings?.enabled || !meta?.enabled) return false;
+    if (!settings?.enabled || !settings?.adultConfirmed || !meta?.enabled) return false;
     // 자동 모드에서는 무장 중이거나 해제 브릿지가 남아 있는 동안까지 NSFW판이 담당한다.
     if (settings.armMode !== 'manual') return Boolean(meta.autoArmed || meta.bridgePending);
     return true;
@@ -543,7 +545,10 @@ function syncNsfwSuspension({ notify = false } = {}) {
     const meta = getChatMeta(false);
     if (!meta?.enabled) return false;
 
+    const linkedNsfw = nsfwExtensionInstalled();
     const delegated = nsfwExtensionOwnsScene();
+    const nsfwMeta = getContext().chatMetadata?.[NSFW_CHAT_STATE_KEY];
+    const immediateHandoff = Boolean(nsfwMeta?.sfwImmediateHandoff);
     const assistantCount = assistantMessages().length;
     if (delegated && meta.nsfwDelegatedAtAssistantCount !== assistantCount) {
         meta.nsfwDelegatedAtAssistantCount = assistantCount;
@@ -553,10 +558,14 @@ function syncNsfwSuspension({ notify = false } = {}) {
     // NSFW판이 마지막으로 담당한 뒤 AI 응답 하나가 추가될 때까지 인계를 유지한다.
     const delegationDraining = meta.nsfwSuspended
         && !delegated
+        && !immediateHandoff
         && Number.isInteger(meta.nsfwDelegatedAtAssistantCount)
         && assistantCount <= meta.nsfwDelegatedAtAssistantCount;
-    const detected = localNsfwWindowScore() >= localNsfwThreshold();
-    const shouldSuspend = delegated || delegationDraining || (meta.nsfwSuspended ? !localNsfwColdStreak() : detected);
+    // 또또NSFW가 설치된 환경에서는 단어 점수로 이중 판정하지 않고 실제 무장 상태만 따른다.
+    // 단독 설치일 때만 완화된 현재-행위 감지를 폴백으로 사용한다.
+    const detected = !linkedNsfw && localNsfwWindowScore() >= localNsfwThreshold();
+    const localSuspended = !linkedNsfw && (meta.nsfwSuspended ? !localNsfwColdStreak() : detected);
+    const shouldSuspend = delegated || delegationDraining || localSuspended;
 
     if (shouldSuspend && !meta.nsfwSuspended) {
         meta.nsfwSuspended = true;
