@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.15';
+const EXTENSION_VERSION = '0.2.16';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -280,6 +280,79 @@ let settingsHomeParent = null;
 let developerTapCount = 0;
 let developerTapTimer = null;
 const registeredEventHandlers = [];
+const diagnosticHarvestSeen = new WeakMap();
+
+// Only fixed labels and numeric identifiers are stored. Never capture prompts,
+// response bodies, profile names, credentials or raw exception messages.
+function recordDiagnostic(step, result, detail = {}) {
+    try {
+        const metadata = getContext().chatMetadata;
+        if (!metadata) return;
+        const rows = Array.isArray(metadata.ttottoSfwDiagnostics) ? metadata.ttottoSfwDiagnostics : [];
+        const row = { at: new Date().toISOString(), version: EXTENSION_VERSION, step, result };
+        for (const key of ['message', 'swipe', 'chars', 'position']) {
+            if (Number.isFinite(detail[key])) row[key] = detail[key];
+        }
+        rows.push(row);
+        metadata.ttottoSfwDiagnostics = rows.slice(-80);
+        if (step === '주입 등록' || step === '주입 실패' || step === '주입 생략') {
+            metadata.ttottoSfwLastInjectionDiagnostic = row;
+        }
+        saveChatMeta();
+        renderDiagnostics();
+    } catch { /* Diagnostics must never block RP or state collection. */ }
+}
+
+function diagnosticText() {
+    const context = getContext();
+    const settings = getSettings();
+    const meta = getChatMeta(false);
+    const target = latestAssistantTarget();
+    const snapshot = target ? snapshotForMessage(target.message) : null;
+    const fresh = Boolean(snapshot?.state && snapshot.messageSignature === target?.contentSignature);
+    const injection = context.chatMetadata?.ttottoSfwLastInjectionDiagnostic;
+    return [
+        `또또SFW v${EXTENSION_VERSION} 진단`,
+        '본문·인물명·API 키 미포함 / 추가 API 호출 없음',
+        '주입 등록 성공은 확장 API에 등록했다는 뜻이며, 실제 전송 프롬프트 포함까지 증명하지 않습니다.',
+        '수신/관찰 기록은 생성 도중에도 남을 수 있습니다. 생성 종료 뒤 결과를 확인하세요.',
+        `실행=${runtimeActive} 전체사용=${Boolean(settings.enabled)} 채팅사용=${Boolean(meta?.enabled)} 자동보정=${Boolean(settings.autoRefine)} NSFW대기=${Boolean(meta?.nsfwSuspended)}`,
+        `최신 AI 메시지=${target?.index ?? '없음'} 스와이프=${target?.swipeIndex ?? '없음'} 최신 원문과 일치하는 저장 상태=${fresh}`,
+        `마지막 주입 기록=${injection ? `${injection.at} v${injection.version} ${injection.result}` : '없음 (업데이트 후 새 답변 생성 필요)'}`,
+        '--- 최근 기록 (최대 80개, 시각은 UTC) ---',
+        ...(context.chatMetadata?.ttottoSfwDiagnostics ?? []).map(row =>
+            `${row.at} v${row.version} [${row.step}] ${row.result}`
+            + ['message', 'swipe', 'chars', 'position'].filter(key => Number.isFinite(row[key]))
+                .map(key => ` ${key}=${row[key]}`).join('')),
+    ].join('\n');
+}
+
+function renderDiagnostics() {
+    if (typeof document === 'undefined') return;
+    const area = document.getElementById('tsf-diagnostic-text');
+    if (area) area.value = diagnosticText();
+    const badge = document.getElementById('tsf-diagnostic-status');
+    if (badge) {
+        const target = latestAssistantTarget();
+        const snapshot = target ? snapshotForMessage(target.message) : null;
+        const fresh = snapshot?.state && snapshot.messageSignature === target?.contentSignature;
+        badge.textContent = !target ? '분석할 답변 없음' : fresh
+            ? '최신 원문과 일치하는 저장 기록 있음 (내용 정확성은 별도)'
+            : '최신 답변의 저장 상태 확인 안 됨 · 아래 장면 정보는 이전 기록일 수 있어요';
+    }
+}
+
+async function copyDiagnostics() {
+    const text = diagnosticText();
+    try {
+        await navigator.clipboard.writeText(text);
+        toastr.success('진단 기록을 복사했어요.', '🫧또또SFW');
+    } catch {
+        const area = element('tsf-diagnostic-text');
+        if (area) { area.value = text; area.focus(); area.select(); }
+        toastr.info('자동 복사가 막혔어요. 선택된 기록을 직접 복사해 주세요.', '🫧또또SFW');
+    }
+}
 
 // ───────────────────────── 컨텍스트/설정 ─────────────────────────
 
@@ -859,21 +932,27 @@ function parseStateJson(text) {
     }
 }
 
-function parseStateFromText(text) {
+function inspectStateReport(text) {
     const source = String(text ?? '');
     let lastJson = null;
     for (const match of source.matchAll(STATE_TAG_REGEX)) {
         lastJson = match[1];
     }
-    if (!lastJson) return null;
+    if (!lastJson) return { state: null, result: /<sfw_scene\b/i.test(source) ? '태그 미완성 또는 빈 태그' : '상태 태그 없음' };
     const start = lastJson.indexOf('{');
     const end = lastJson.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
+    if (start < 0 || end <= start) return { state: null, result: 'JSON 객체 누락/잘림' };
     try {
-        return sanitizeState(parseStateJson(lastJson.slice(start, end + 1)));
-    } catch {
-        return null;
+        const state = sanitizeState(parseStateJson(lastJson.slice(start, end + 1)));
+        return { state, result: state ? '태그 해석 성공' : '상태 값 없음' };
+    } catch (error) {
+        const position = Number(String(error?.message ?? '').match(/position\s+(\d+)/i)?.[1]);
+        return { state: null, result: 'JSON 형식 오류', position };
     }
+}
+
+function parseStateFromText(text) {
+    return inspectStateReport(text).state;
 }
 
 function stripStateTag(text) {
@@ -933,7 +1012,10 @@ function harvestMessage(message) {
     let changed = false;
     let found = false;
 
-    const state = parseStateFromText(message.mes);
+    const inspection = inspectStateReport(message.mes);
+    const state = inspection.state;
+    const beforeSignature = messageStateSignature(message);
+    const shouldLog = diagnosticHarvestSeen.get(message) !== beforeSignature;
     const strippedMes = stripStateTag(message.mes);
     if (strippedMes !== message.mes) {
         message.mes = strippedMes;
@@ -955,6 +1037,15 @@ function harvestMessage(message) {
         const snapshot = snapshotForMessage(message);
         found = Boolean(snapshot?.state && snapshot.messageSignature === signature);
     }
+    if (shouldLog) {
+        recordDiagnostic('태그 수신', found && !state ? '이 메시지의 저장 기록 재사용' : inspection.result, {
+            message: getContext().chat?.indexOf(message), swipe: swipeIndex,
+            chars: String(message.mes ?? '').length, position: inspection.position,
+        });
+        if (state) recordDiagnostic('상태 반영', '메시지 메모리에 저장됨', { message: getContext().chat?.indexOf(message), swipe: swipeIndex });
+        if (!state && changed) recordDiagnostic('태그 제거', '해석 성공 없이 태그 제거됨 · 이전 상태 유지');
+    }
+    diagnosticHarvestSeen.set(message, signature);
     return { changed, found, state };
 }
 
@@ -1672,12 +1763,17 @@ function clearInjectedPrompt() {
 }
 
 globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationInterceptor(_chat, _contextSize, _abort, type) {
+    recordDiagnostic('주입 시작', ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLowerCase()) ? '지원 생성 유형' : '지원하지 않는 생성 유형');
     clearInjectedPrompt();
     try {
-        if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) return;
+        if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) {
+            recordDiagnostic('주입 생략', '지원하지 않는 생성 유형 · 기존 주입 초기화됨');
+            return;
+        }
         const settings = getSettings();
         const meta = getChatMeta();
         if (isSupervising() && syncNsfwSuspension()) {
+            recordDiagnostic('주입 생략', 'NSFW 인계 중');
             console.debug(`${LOG_PREFIX} NSFW 장면 자동 인계 — SFW 주입 생략`);
             return;
         }
@@ -1692,16 +1788,18 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
         if (bridgeOnly) {
             const prompt = BRIDGE_LINES.join('\n');
             getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
+            recordDiagnostic('주입 등록', '해제 브릿지만 등록 (상태 태그 요청 없음)', { chars: prompt.length });
             meta.bridgePending = false;
             saveChatMeta();
             console.debug(`${LOG_PREFIX} 수동 해제 브릿지 주입 (${prompt.length}자)`);
             return;
         }
-        if (!isSupervising()) return;
+        if (!isSupervising()) { recordDiagnostic('주입 생략', '확장 또는 현재 채팅 비활성'); return; }
         if (settings.slowBurnEnabled && isFullyArmed()) startSlowBurnSessionIfNeeded();
         const prompt = buildInjection();
-        if (!prompt) return;
+        if (!prompt) { recordDiagnostic('주입 생략', '빈 주입문'); return; }
         getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
+        recordDiagnostic('주입 등록', prompt.includes('<sfw_scene>') ? '상태 태그 요청 등록 성공' : '태그 요청 없는 주입문', { chars: prompt.length });
         // 해제 브릿지는 딱 한 번만: 이번 생성에 실렸으면 플래그를 끈다 (미리보기는 소모하지 않음)
         if (meta?.bridgePending && !isFullyArmed()) {
             meta.bridgePending = false;
@@ -1710,6 +1808,7 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
         console.debug(`${LOG_PREFIX} 장면 연속성 지침 주입 (${prompt.length}자)`);
     } catch (error) {
         clearInjectedPrompt();
+        recordDiagnostic('주입 실패', '주입 처리 중 예외 (민감정보 보호를 위해 오류 원문 생략)');
         console.error(`${LOG_PREFIX} 생성 전 주입 실패 — 본 채팅 생성은 계속합니다.`, error);
     }
 };
@@ -1892,6 +1991,7 @@ async function runRefine({ manual = false } = {}) {
     queuedRefineTarget = null;
     refineRunning = true;
     activeRefineTarget = target;
+    recordDiagnostic('보조 분석', manual ? '수동 요청 시작' : '자동 요청 시작', { message: target.index, swipe: target.swipeIndex });
     lastAutoRefineTarget = target;
     const controller = new AbortController();
     refineAbortController = controller;
@@ -1903,6 +2003,7 @@ async function runRefine({ manual = false } = {}) {
         const state = parseRefineResponse(response);
         const currentTarget = latestAssistantTarget();
         if (!sameRefineTarget(currentTarget, target)) {
+            recordDiagnostic('보조 분석', '원문 변경으로 결과 폐기');
             queuedRefineTarget = currentTarget;
             console.debug(`${LOG_PREFIX} 보정 중 최신 답변이 바뀌어 이전 분석 결과를 폐기합니다.`);
             return false;
@@ -1926,15 +2027,18 @@ async function runRefine({ manual = false } = {}) {
         persistChat();
         meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
         meta.nsfwResumePending = false;
+        recordDiagnostic('보조 분석', '상태 반영 완료', { message: target.index, swipe: target.swipeIndex });
         saveChatMeta();
         if (manual) toastr.success('보조 AI가 장면 상태를 다시 잡았어요.', '🫧또또SFW');
         return true;
     } catch (error) {
         if (error?.name === 'AbortError') {
+            recordDiagnostic('보조 분석', '요청 취소');
             if (sameRefineTarget(lastAutoRefineTarget, target)) lastAutoRefineTarget = null;
             return false;
         }
         console.error(`${LOG_PREFIX} 보정 분석 실패`, error);
+        recordDiagnostic('보조 분석', '요청 또는 응답 해석 실패 (오류 원문 생략)');
         if (manual) toastr.error(`보정 분석 실패: ${error?.message ?? error}`, '🫧또또SFW');
         return false;
     } finally {
@@ -2063,18 +2167,24 @@ function rerenderMessage(index, message) {
 function persistChat() {
     const context = getContext();
     try {
-        if (typeof context.saveChatDebounced === 'function') context.saveChatDebounced();
-        else if (typeof context.saveChat === 'function') void context.saveChat();
+        if (typeof context.saveChatDebounced === 'function') {
+            context.saveChatDebounced();
+            recordDiagnostic('채팅 저장', '저장 예약 함수 호출 (디스크 완료 미확인)');
+        } else if (typeof context.saveChat === 'function') {
+            Promise.resolve(context.saveChat()).then(() => recordDiagnostic('채팅 저장', '저장 함수 완료'),
+                () => recordDiagnostic('채팅 저장', '저장 함수 실패'));
+        } else recordDiagnostic('채팅 저장', '저장 함수 없음');
     } catch (error) {
+        recordDiagnostic('채팅 저장', '저장 호출 실패');
         console.debug(`${LOG_PREFIX} 채팅 저장 생략`, error);
     }
 }
 
 function handleIncomingMessage(index) {
     const settings = getSettings();
-    if (!settings.enabled) return;
+    if (!settings.enabled) { recordDiagnostic('수집 생략', '전체 사용 꺼짐'); return; }
     const meta = getChatMeta(false);
-    if (!meta?.enabled) return;
+    if (!meta?.enabled) { recordDiagnostic('수집 생략', '현재 채팅 사용 꺼짐'); return; }
 
     const entry = messageEntryByIndex(index);
     const message = entry?.message;
@@ -2098,6 +2208,7 @@ function handleIncomingMessage(index) {
         persistChat();
     }
     if (suspended) {
+        recordDiagnostic('자동 보정 생략', 'NSFW 인계 중');
         updateUi();
         return;
     }
@@ -2299,6 +2410,7 @@ function renderCardLinkPanel(settings) {
 }
 
 function renderStatePanel() {
+    renderDiagnostics();
     const { state, source } = effectiveState();
     const settings = getSettings();
     renderSlowBurnPanel(settings);
@@ -2676,6 +2788,13 @@ function bindSetting(id, key, parser = (value) => value, after = null) {
 }
 
 function bindUi() {
+    element('tsf-diagnostic-copy')?.addEventListener('click', copyDiagnostics);
+    element('tsf-diagnostic-refresh')?.addEventListener('click', renderDiagnostics);
+    element('tsf-diagnostic-clear')?.addEventListener('click', () => {
+        getContext().chatMetadata.ttottoSfwDiagnostics = [];
+        delete getContext().chatMetadata.ttottoSfwLastInjectionDiagnostic;
+        recordDiagnostic('진단', '사용자가 진단 기록만 비움');
+    });
     // 탭 클릭은 루트 위임으로 — 패널이 팝업으로 이동해도, 어떤 환경에서도 확실히 잡힌다
     const root = document.getElementById('ttotto-sfw-settings');
     element('tsf-header-title').addEventListener('click', handleDeveloperTitleTap);
@@ -3132,8 +3251,12 @@ function registerEvents() {
     const listen = (name, handler) => {
         const event = events[name];
         if (!event) return;
-        context.eventSource.on(event, handler);
-        registeredEventHandlers.push({ event, handler });
+        const wrapped = (...args) => {
+            recordDiagnostic('이벤트', name, { message: Number.isInteger(args[0]) ? args[0] : undefined });
+            return handler(...args);
+        };
+        context.eventSource.on(event, wrapped);
+        registeredEventHandlers.push({ event, handler: wrapped });
     };
 
     listen('MESSAGE_RECEIVED', (index) => schedulePostGenerationHarvest(index));
@@ -3173,6 +3296,7 @@ function unregisterEvents() {
 async function initialize() {
     runtimeActive = true;
     getSettings();
+    recordDiagnostic('진단', '확장 로드 · 이전 생성의 주입 여부는 소급 확인 불가');
     registerEvents();
     await initializeUi();
     schedulePostGenerationHarvest();
