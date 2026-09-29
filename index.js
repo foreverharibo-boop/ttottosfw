@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.17';
+const EXTENSION_VERSION = '0.2.19';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1780,6 +1780,22 @@ function generationTypeDiagnostic(type) {
     return `미지원 유형 (${typeof type})`;
 }
 
+function onGenerationStarted(type, options, dryRun) {
+    recordDiagnostic('생성 시작 유형', `${generationTypeDiagnostic(type)}${dryRun ? ' · 미리 계산(dryRun)' : ''}`);
+    if (dryRun) return;
+    const normalized = normalizeGenerationType(type);
+    if (normalized === 'quiet') {
+        recordDiagnostic('숨은 생성 분류', 'quiet · 상태 지시 주입 제외');
+        recordDiagnostic('숨은 생성 옵션', `quietToLoud=${Boolean(options?.quietToLoud)}`);
+    }
+    if (ALLOWED_GENERATION_TYPES.has(normalized)) {
+        recordDiagnostic('조기 주입', '생성 시작 이벤트에서 상태 지시 등록 시도');
+        prepareSceneInjection({ consumeBridge: false });
+    } else if (normalized === 'quiet' || normalized === 'impersonate') {
+        clearInjectedPrompt();
+    }
+}
+
 globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationInterceptor(_chat, _contextSize, _abort, type) {
     const generationType = normalizeGenerationType(type);
     recordDiagnostic('주입 시작', generationTypeDiagnostic(type));
@@ -1794,6 +1810,10 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
         }
         return;
     }
+    prepareSceneInjection();
+};
+
+function prepareSceneInjection({ consumeBridge = true } = {}) {
     clearInjectedPrompt();
     try {
         const settings = getSettings();
@@ -1815,8 +1835,10 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
             const prompt = BRIDGE_LINES.join('\n');
             getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
             recordDiagnostic('주입 등록', '해제 브릿지만 등록 (상태 태그 요청 없음)', { chars: prompt.length });
-            meta.bridgePending = false;
-            saveChatMeta();
+            if (consumeBridge) {
+                meta.bridgePending = false;
+                saveChatMeta();
+            }
             console.debug(`${LOG_PREFIX} 수동 해제 브릿지 주입 (${prompt.length}자)`);
             return;
         }
@@ -1827,7 +1849,7 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
         getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
         recordDiagnostic('주입 등록', prompt.includes('<sfw_scene>') ? '상태 태그 요청 등록 성공' : '태그 요청 없는 주입문', { chars: prompt.length });
         // 해제 브릿지는 딱 한 번만: 이번 생성에 실렸으면 플래그를 끈다 (미리보기는 소모하지 않음)
-        if (meta?.bridgePending && !isFullyArmed()) {
+        if (consumeBridge && meta?.bridgePending && !isFullyArmed()) {
             meta.bridgePending = false;
             saveChatMeta();
         }
@@ -1837,7 +1859,7 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
         recordDiagnostic('주입 실패', '주입 처리 중 예외 (민감정보 보호를 위해 오류 원문 생략)');
         console.error(`${LOG_PREFIX} 생성 전 주입 실패 — 본 채팅 생성은 계속합니다.`, error);
     }
-};
+}
 
 // ───────────────────────── 보조 AI 보정 (하이브리드 폴백) ─────────────────────────
 
@@ -3285,12 +3307,12 @@ function registerEvents() {
         registeredEventHandlers.push({ event, handler: wrapped });
     };
 
-    listen('GENERATION_STARTED', (type, _options, dryRun) => {
-        recordDiagnostic('생성 시작 유형', `${generationTypeDiagnostic(type)}${dryRun ? ' · 미리 계산(dryRun)' : ''}`);
-    });
+    listen('GENERATION_STARTED', onGenerationStarted);
     listen('MESSAGE_RECEIVED', (index) => schedulePostGenerationHarvest(index));
     // 스와이프·렌더 보험: ST 버전이나 번역 확장에 따라 메시지 추가/수정 이벤트 순서가 달라질 수 있다.
-    listen('GENERATION_ENDED', () => schedulePostGenerationHarvest());
+    listen('GENERATION_ENDED', () => {
+        schedulePostGenerationHarvest();
+    });
     listen('CHARACTER_MESSAGE_RENDERED', (index) => schedulePostGenerationHarvest(index));
     listen('MESSAGE_SWIPED', (index) => schedulePostGenerationHarvest(index));
     listen('MESSAGE_EDITED', (index) => schedulePostGenerationHarvest(index));
