@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.21';
+const EXTENSION_VERSION = '0.2.22';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1030,6 +1030,9 @@ function harvestMessage(message) {
     }
     const signature = messageStateSignature(message);
     if (state) {
+        // 일반 태그 수신에도 원문의 날짜·시각을 우선한다. 추가 AI 호출 없음.
+        const panelTime = infoPanelField(message.mes, 'Date', '날짜');
+        if (panelTime) state.time = toBi(panelTime);
         const store = getMessageStore(message);
         store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature };
         found = true;
@@ -1611,6 +1614,7 @@ function stateReportLines(settings, nextGuidance = '') {
         'Keep JSON string values on one line. Escape embedded quotation marks and backslashes using JSON syntax; never put literal line breaks or tabs inside strings.',
         `<sfw_scene>{${fields.join(',')}}</sfw_scene>`,
         'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
+        'If this response includes an Info_panel Date field, copy its full date and clock time into "time"; never replace an explicit clock time with a vague phrase such as late afternoon. Without that field, use the established time context without inventing a clock time.',
         'Classify "scene_type" as exactly one of: general, daily, conversation, romance, conflict, action, investigation. Choose the type that best describes the response ending.',
         'Keep the established "scene_type" when the scene merely contains a few lines of dialogue or a small action. Change it only when the dominant kind of scene genuinely shifts.',
         'Repeat the complete current location, time context, environment, important-object states, and every present character state. Use an empty string or empty object only when the information is genuinely unknown or absent.',
