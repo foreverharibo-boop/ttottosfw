@@ -545,7 +545,3 @@
 .ttotto-sfw-settings .tsf-card-link-row {
     margin: 0;
 }
-.ttotto-sfw-settings .tsf-diagnostics { margin-block: 12px; color: inherit; text-shadow: none; }
-.ttotto-sfw-settings .tsf-diagnostics small { display: block; margin-block: 6px; overflow-wrap: anywhere; }
-.ttotto-sfw-settings .tsf-diagnostic-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 8px; }
-.ttotto-sfw-settings #tsf-diagnostic-text { width: 100%; resize: vertical; min-height: 150px; font-size: 12px; line-height: 1.5; text-shadow: none; }
