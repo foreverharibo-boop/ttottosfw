@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.16';
+const EXTENSION_VERSION = '0.2.17';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1762,14 +1762,40 @@ function clearInjectedPrompt() {
     }
 }
 
+// ST 1.12.14's sendTextareaMessage calls Generate(undefined) for ordinary
+// sends. Newer versions explicitly pass 'normal'. Both are normal RP.
+function normalizeGenerationType(type) {
+    if (type === undefined || type === null) return 'normal';
+    if (typeof type !== 'string') return 'unknown';
+    return type.trim().toLowerCase() || 'normal';
+}
+
+function generationTypeDiagnostic(type) {
+    if (type === undefined) return 'undefined → normal (일반 생성 호환)';
+    if (type === null) return 'null → normal (일반 생성 호환)';
+    if (typeof type === 'string' && !type.trim()) return '빈 문자열 → normal (일반 생성 호환)';
+    const normalized = normalizeGenerationType(type);
+    if (ALLOWED_GENERATION_TYPES.has(normalized) || ['quiet', 'impersonate'].includes(normalized)) return normalized;
+    // Do not serialize arbitrary objects/strings from third-party extensions.
+    return `미지원 유형 (${typeof type})`;
+}
+
 globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationInterceptor(_chat, _contextSize, _abort, type) {
-    recordDiagnostic('주입 시작', ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLowerCase()) ? '지원 생성 유형' : '지원하지 않는 생성 유형');
+    const generationType = normalizeGenerationType(type);
+    recordDiagnostic('주입 시작', generationTypeDiagnostic(type));
+    if (!ALLOWED_GENERATION_TYPES.has(generationType)) {
+        if (generationType === 'quiet' || generationType === 'impersonate') {
+            // Known auxiliary/user-role generations must not inherit the RP
+            // state-report instruction. The next RP request rebuilds it.
+            clearInjectedPrompt();
+            recordDiagnostic('주입 생략', `${generationType}: 보조/유저역 생성에 상태 지시가 섞이지 않도록 제거`);
+        } else {
+            recordDiagnostic('주입 생략', '미지원 유형 · 새 주입 및 기존 주입 변경 없음');
+        }
+        return;
+    }
     clearInjectedPrompt();
     try {
-        if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) {
-            recordDiagnostic('주입 생략', '지원하지 않는 생성 유형 · 기존 주입 초기화됨');
-            return;
-        }
         const settings = getSettings();
         const meta = getChatMeta();
         if (isSupervising() && syncNsfwSuspension()) {
@@ -3259,6 +3285,9 @@ function registerEvents() {
         registeredEventHandlers.push({ event, handler: wrapped });
     };
 
+    listen('GENERATION_STARTED', (type, _options, dryRun) => {
+        recordDiagnostic('생성 시작 유형', `${generationTypeDiagnostic(type)}${dryRun ? ' · 미리 계산(dryRun)' : ''}`);
+    });
     listen('MESSAGE_RECEIVED', (index) => schedulePostGenerationHarvest(index));
     // 스와이프·렌더 보험: ST 버전이나 번역 확장에 따라 메시지 추가/수정 이벤트 순서가 달라질 수 있다.
     listen('GENERATION_ENDED', () => schedulePostGenerationHarvest());
