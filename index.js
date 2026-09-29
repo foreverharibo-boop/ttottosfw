@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.12';
+const EXTENSION_VERSION = '0.2.13';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -598,7 +598,11 @@ function importNsfwStateForResume() {
     if (!state) return null;
     const at = Date.now();
     const store = getMessageStore(found.message);
-    store.swipes[String(currentSwipeIndex(found.message))] = { state, at };
+    store.swipes[String(currentSwipeIndex(found.message))] = {
+        state,
+        at,
+        messageSignature: messageStateSignature(found.message),
+    };
     persistChat();
     return { state, at };
 }
@@ -874,6 +878,14 @@ function currentSwipeIndex(message) {
     return Number.isInteger(message?.swipe_id) ? message.swipe_id : 0;
 }
 
+function messageStateSignature(message) {
+    const swipeIndex = currentSwipeIndex(message);
+    const fullText = String(message?.mes ?? '');
+    const translationMarker = fullText.search(/\r?\n\s*번역문\s*\r?\n/i);
+    const text = translationMarker >= 0 ? fullText.slice(0, translationMarker) : fullText;
+    return `${swipeIndex}:${text.length}:${messageTextHash(text)}`;
+}
+
 function snapshotForMessage(message) {
     const store = getMessageStore(message, false);
     if (!store) return null;
@@ -888,11 +900,6 @@ function harvestMessage(message) {
     let found = false;
 
     const state = parseStateFromText(message.mes);
-    if (state) {
-        const store = getMessageStore(message);
-        store.swipes[String(swipeIndex)] = { state, at: Date.now() };
-        found = true;
-    }
     const strippedMes = stripStateTag(message.mes);
     if (strippedMes !== message.mes) {
         message.mes = strippedMes;
@@ -905,8 +912,14 @@ function harvestMessage(message) {
             changed = true;
         }
     }
-    if (!found) {
-        found = Boolean(snapshotForMessage(message));
+    const signature = messageStateSignature(message);
+    if (state) {
+        const store = getMessageStore(message);
+        store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature };
+        found = true;
+    } else {
+        const snapshot = snapshotForMessage(message);
+        found = Boolean(snapshot?.state && snapshot.messageSignature === signature);
     }
     return { changed, found, state };
 }
@@ -1811,6 +1824,7 @@ function latestAssistantTarget() {
             message,
             swipeIndex,
             signature: `${index}:${swipeIndex}:${String(message.mes ?? '').length}:${messageTextHash(message.mes)}`,
+            contentSignature: messageStateSignature(message),
         };
     }
     return null;
@@ -1856,7 +1870,11 @@ async function runRefine({ manual = false } = {}) {
         const refinedAt = Date.now();
         // 요청을 시작한 정확한 메시지·스와이프에만 결과를 붙인다.
         const store = getMessageStore(target.message);
-        store.swipes[String(target.swipeIndex)] = { state, at: refinedAt };
+        store.swipes[String(target.swipeIndex)] = {
+            state,
+            at: refinedAt,
+            messageSignature: target.contentSignature,
+        };
         persistChat();
         meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
         meta.nsfwResumePending = false;
