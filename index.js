@@ -14,7 +14,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.13';
+const EXTENSION_VERSION = '0.2.14';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -825,6 +825,42 @@ function stateCompletenessIssues(state, settings = getSettings()) {
     return issues;
 }
 
+// 모델이 JSON 문자열 안에 실제 줄바꿈/탭을 넣은 경우에만 표기를 복구한다.
+// 값·따옴표·키·잘린 구조는 추측해서 변경하지 않는다. 정상 JSON은 그대로 파싱한다.
+function parseStateJson(text) {
+    const source = String(text ?? '');
+    try {
+        return JSON.parse(source);
+    } catch (originalError) {
+        let inString = false;
+        let escaped = false;
+        let repaired = '';
+        let changed = false;
+        for (const char of source) {
+            const code = char.charCodeAt(0);
+            if (inString && code < 0x20) {
+                // 직전의 역슬래시는 이미 출력했으므로 겹치지 않게 한다.
+                repaired += (escaped ? '' : '\\') + `u${code.toString(16).padStart(4, '0')}`;
+                escaped = false;
+                changed = true;
+                continue;
+            }
+            repaired += char;
+            if (!inString) {
+                if (char === '"') inString = true;
+            } else if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+        }
+        if (!changed) throw originalError;
+        return JSON.parse(repaired);
+    }
+}
+
 function parseStateFromText(text) {
     const source = String(text ?? '');
     let lastJson = null;
@@ -836,7 +872,7 @@ function parseStateFromText(text) {
     const end = lastJson.lastIndexOf('}');
     if (start < 0 || end <= start) return null;
     try {
-        return sanitizeState(JSON.parse(lastJson.slice(start, end + 1)));
+        return sanitizeState(parseStateJson(lastJson.slice(start, end + 1)));
     } catch {
         return null;
     }
@@ -1483,6 +1519,7 @@ function stateReportLines(settings, nextGuidance = '') {
 
     const lines = [
         'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
+        'Keep JSON string values on one line. Escape embedded quotation marks and backslashes using JSON syntax; never put literal line breaks or tabs inside strings.',
         `<sfw_scene>{${fields.join(',')}}</sfw_scene>`,
         'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
         'Classify "scene_type" as exactly one of: general, daily, conversation, romance, conflict, action, investigation. Choose the type that best describes the response ending.',
@@ -1735,6 +1772,7 @@ Schema:
 {${fields.join(',')}}
 
 Rules:
+- Keep JSON string values on one line. Escape embedded quotation marks and backslashes using JSON syntax; never put literal line breaks or tabs inside strings.
 - Every string value is a bilingual pair: concise English first, then " || ", then natural Korean.
 - Describe the state at the END of the log, factually and concisely. Include current time context, environment, scene-relevant object states, every present character, and significant physical-condition changes.
 - Classify "scene_type" as exactly one of: general, daily, conversation, romance, conflict, action, investigation.
@@ -1798,7 +1836,14 @@ function parseRefineResponse(text) {
     const start = clean.indexOf('{');
     const end = clean.lastIndexOf('}');
     if (start < 0 || end <= start) throw new Error('보정 분석 응답에 JSON 객체가 없습니다.');
-    const state = sanitizeState(JSON.parse(clean.slice(start, end + 1)));
+    let raw;
+    try {
+        raw = parseStateJson(clean.slice(start, end + 1));
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} 보조 응답 JSON 해석 실패`, error);
+        throw new Error('AI 분석 응답의 JSON 형식이 잘못되었거나 중간에 잘렸어요. 이번 결과는 저장하지 않았어요.');
+    }
+    const state = sanitizeState(raw);
     if (!state) throw new Error('보정 분석 결과가 비어 있습니다.');
     return state;
 }
