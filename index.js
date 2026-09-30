@@ -79,7 +79,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.25';
+const EXTENSION_VERSION = '0.2.26';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -535,7 +535,8 @@ function isSupervising() {
 
 // 개입 중: 연속성·반복금지·진행 지시까지 전부 주입하는 상태
 function isFullyArmed() {
-    return Boolean(isSupervising() && !getChatMeta(false)?.nsfwSuspended);
+    return Boolean(isSupervising() && !getChatMeta(false)?.nsfwSuspended
+        && localNsfwWindowScore() < localNsfwThreshold());
 }
 
 // ───────────────────────── NSFW 장면 자동 인계 ─────────────────────────
@@ -585,14 +586,8 @@ function recentConversationMessages(limit) {
 }
 
 function localNsfwWindowScore() {
-    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
-    const storedFrom = Number(getChatMeta(false)?.nsfwDetectionCooldownFrom ?? 0);
-    const from = Number.isInteger(storedFrom) && storedFrom >= 0 && storedFrom <= chat.length ? storedFrom : 0;
-    return chat
-        .map((message, index) => ({ message, index }))
-        .filter(({ message, index }) => message && !message.is_system && index >= from)
-        .slice(-NSFW_LOCAL_WINDOW)
-        .reduce((total, { message }) => total + localNsfwScore(message.mes), 0);
+    return recentConversationMessages(NSFW_LOCAL_WINDOW)
+        .reduce((total, message) => total + localNsfwScore(message.mes), 0);
 }
 
 function localNsfwColdStreak() {
@@ -648,7 +643,7 @@ function importNsfwStateForResume() {
         characters,
         acts: source.acts,
         dialogue_beats: source.dialogueBeats,
-        intensity: Number.isFinite(Number(source.heat)) ? Number(source.heat) : 0,
+        intensity: 0, // NSFW의 성적 온도는 SFW 서사 강도로 복사하지 않는다.
         next: source.next,
     });
     if (!state) return null;
@@ -671,7 +666,6 @@ function syncNsfwSuspension({ notify = false } = {}) {
     const meta = getChatMeta(false);
     if (!meta?.enabled) return false;
 
-    const linkedNsfw = nsfwExtensionInstalled();
     const delegated = nsfwExtensionOwnsScene();
     const nsfwMeta = getContext().chatMetadata?.[NSFW_CHAT_STATE_KEY];
     const immediateHandoff = Boolean(nsfwMeta?.sfwImmediateHandoff);
@@ -698,10 +692,10 @@ function syncNsfwSuspension({ notify = false } = {}) {
         && !immediateHandoff
         && Number.isInteger(meta.nsfwDelegatedAtAssistantCount)
         && assistantCount <= meta.nsfwDelegatedAtAssistantCount;
-    // 또또NSFW가 설치된 환경에서는 단어 점수로 이중 판정하지 않고 실제 무장 상태만 따른다.
-    // 단독 설치일 때만 완화된 현재-행위 감지를 폴백으로 사용한다.
-    const detected = !linkedNsfw && localNsfwWindowScore() >= localNsfwThreshold();
-    const localSuspended = !linkedNsfw && (meta.nsfwSuspended ? !localNsfwColdStreak() : detected);
+    // NSFW가 설치되어도 감지 누락/비활성 때문에 SFW가 성적 장면을 맡지 않도록 막는다.
+    // NSFW의 설정을 강제로 켜지 않으며, SFW는 자기 주입과 보조 분석만 중단한다.
+    const detected = localNsfwWindowScore() >= localNsfwThreshold();
+    const localSuspended = meta.nsfwSuspended ? !localNsfwColdStreak() : detected;
     const shouldSuspend = delegated || delegationDraining || localSuspended;
 
     if (shouldSuspend && !meta.nsfwSuspended) {
@@ -1605,7 +1599,7 @@ function stateReportLines(settings, nextGuidance = '') {
 function buildInjection() {
     const settings = getSettings();
     const meta = getChatMeta(false);
-    if (meta?.nsfwSuspended) return '';
+    if (meta?.nsfwSuspended || localNsfwWindowScore() >= localNsfwThreshold()) return '';
     const resuming = Boolean(meta?.nsfwResumePending);
     const { state } = effectiveState();
     const targetActive = slowBurnTargetProgress().active;
@@ -1768,7 +1762,8 @@ function prepareSceneInjection({ consumeBridge = true } = {}) {
     try {
         const settings = getSettings();
         const meta = getChatMeta();
-        if (isSupervising() && syncNsfwSuspension()) {
+        const nsfwSuspended = syncNsfwSuspension();
+        if (localNsfwWindowScore() >= localNsfwThreshold() || nsfwSuspended) {
 
             console.debug(`${LOG_PREFIX} NSFW 장면 자동 인계 — SFW 주입 생략`);
             return;
