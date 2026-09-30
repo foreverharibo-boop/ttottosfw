@@ -1,13 +1,13 @@
 {
-  "display_name": "🫧또또SFW",
-  "loading_order": 1,
+  "display_name": "🔞또또NSFW",
+  "loading_order": 0,
   "js": "index.js",
   "css": "style.css",
   "author": "담은",
-  "version": "0.2.23",
+  "version": "0.13.6",
   "auto_update": true,
   "minimum_client_version": "1.12.14",
-  "generate_interceptor": "ttottoSfwGenerationInterceptor",
+  "generate_interceptor": "ttottoNsfwGenerationInterceptor",
   "hooks": {
     "enable": "onEnable",
     "disable": "onDisable",
