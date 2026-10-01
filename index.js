@@ -79,7 +79,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.27';
+const EXTENSION_VERSION = '0.2.28';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -698,13 +698,7 @@ function importNsfwStateForResume() {
     });
     if (!state) return null;
     const at = Date.now();
-    const store = getMessageStore(found.message);
-    store.swipes[String(currentSwipeIndex(found.message))] = {
-        state,
-        at,
-        messageSignature: messageStateSignature(found.message),
-    };
-    persistChat();
+    // 복귀용 연속성 참고값이다. NSFW가 담당한 과거 답변에 SFW 기록을 덧붙이지 않는다.
     return { state, at };
 }
 
@@ -719,17 +713,6 @@ function syncNsfwSuspension({ notify = false } = {}) {
     const delegated = nsfwExtensionOwnsScene();
     const nsfwMeta = getContext().chatMetadata?.[NSFW_CHAT_STATE_KEY];
     const immediateHandoff = Boolean(nsfwMeta?.sfwImmediateHandoff);
-    // 구버전이 이미 대기는 풀었지만 nsfw-resume만 남긴 채팅도 업데이트 즉시 복구한다.
-    if (!delegated && !meta.nsfwSuspended && meta.nsfwResumePending) {
-        const imported = importNsfwStateForResume();
-        if (imported) {
-            meta.nsfwResumePending = false;
-            meta.manualState = { state: imported.state, at: imported.at, source: 'nsfw-handoff' };
-            saveChatMeta();
-        } else {
-            scheduleResumeRefine();
-        }
-    }
     const assistantCount = assistantMessages().length;
     if (delegated && meta.nsfwDelegatedAtAssistantCount !== assistantCount) {
         meta.nsfwDelegatedAtAssistantCount = assistantCount;
@@ -748,8 +731,24 @@ function syncNsfwSuspension({ notify = false } = {}) {
     const localSuspended = meta.nsfwSuspended ? !localNsfwColdStreak() : detected;
     const shouldSuspend = holdsRewriteGeneration() || delegated || delegationDraining || localSuspended;
 
+    // 구버전이 이미 대기는 풀었지만 nsfw-resume만 남긴 채팅도 업데이트 즉시 복구한다.
+    if (!shouldSuspend && !meta.nsfwSuspended && meta.nsfwResumePending) {
+        const imported = importNsfwStateForResume();
+        if (imported) {
+            meta.nsfwResumePending = false;
+            meta.manualState = { state: imported.state, at: imported.at, source: 'nsfw-handoff' };
+            saveChatMeta();
+        } else {
+            scheduleResumeRefine();
+        }
+    }
+
     if (shouldSuspend && !meta.nsfwSuspended) {
         meta.nsfwSuspended = true;
+        clearTimeout(refineTimer);
+        refineTimer = null;
+        queuedRefineTarget = null;
+        refineAbortController?.abort();
         meta.nsfwResumePending = false;
         meta.bridgePending = false;
         resetSlowBurnSession(meta);
@@ -1009,7 +1008,7 @@ function currentSwipeIndex(message) {
 
 function messageStateSignature(message) {
     const swipeIndex = currentSwipeIndex(message);
-    const fullText = String(message?.mes ?? '');
+    const fullText = stripDetectorTags(message?.mes);
     const translationMarker = fullText.search(/\r?\n\s*번역문\s*\r?\n/i);
     const text = translationMarker >= 0 ? fullText.slice(0, translationMarker) : fullText;
     return `${swipeIndex}:${text.length}:${messageTextHash(text)}`;
@@ -2020,7 +2019,7 @@ function latestAssistantTarget() {
 async function runRefine({ manual = false } = {}) {
     const settings = getSettings();
     if (!runtimeActive || refineRunning) return false;
-    if (getChatMeta(false)?.nsfwSuspended) {
+    if (syncNsfwSuspension()) {
         if (manual) toastr.info('NSFW 장면을 다른 확장에 인계한 동안에는 SFW 보정을 쉬어요.', '🫧또또SFW');
         return false;
     }
@@ -2044,7 +2043,8 @@ async function runRefine({ manual = false } = {}) {
 
     try {
         const response = await awaitRefineResponse(controller.signal);
-        if (controller.signal.aborted || !runtimeActive) return false;
+        if (controller.signal.aborted || !runtimeActive || !getSettings().enabled
+            || !getChatMeta(false)?.enabled || syncNsfwSuspension()) return false;
         const state = parseRefineResponse(response);
         const currentTarget = latestAssistantTarget();
         if (!sameRefineTarget(currentTarget, target)) {
@@ -2246,22 +2246,33 @@ function handleIncomingMessage(index) {
     }
     lastCompletedAssistant = { metadata: getContext().chatMetadata, message };
 
-    const { changed, found, state } = harvestMessage(message);
     const suspended = syncNsfwSuspension({ notify: true });
+    if (suspended) {
+        // 현재 메시지/스와이프의 태그가 사라지기 전에 NSFW에게 전달한다.
+        // NSFW 비활성 상태라면 설정을 강제로 켜거나 SFW에 대신 저장하지 않는다.
+        globalThis.ttottoNsfwSceneBridge?.collect?.(message);
+        let changed = false;
+        const stripped = stripStateTag(message.mes);
+        if (stripped !== message.mes) { message.mes = stripped; changed = true; }
+        const swipe = currentSwipeIndex(message);
+        if (typeof message.swipes?.[swipe] === 'string') {
+            const clean = stripStateTag(message.swipes[swipe]);
+            if (clean !== message.swipes[swipe]) { message.swipes[swipe] = clean; changed = true; }
+        }
+        if (changed) { rerenderMessage(entry.index, message); persistChat(); }
+        updateUi();
+        return;
+    }
+    const { changed, found, state } = harvestMessage(message);
     if (found) {
         // 새 스냅샷이 수동 보정보다 최신이므로 수동 보정은 자연히 밀려남
         if (meta.manualState && Number(meta.manualState.at ?? 0) < Date.now()) meta.manualState = null;
-        if (!suspended) meta.nsfwResumePending = false;
+        meta.nsfwResumePending = false;
         saveChatMeta();
     }
     if (changed) {
         rerenderMessage(entry.index, message);
         persistChat();
-    }
-    if (suspended) {
-
-        updateUi();
-        return;
     }
     const targetProgress = slowBurnTargetProgress();
     if (targetProgress.active && targetProgress.completedTurns >= targetProgress.requiredTurns) {
