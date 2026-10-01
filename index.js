@@ -79,7 +79,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.26';
+const EXTENSION_VERSION = '0.2.27';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -593,7 +593,57 @@ function localNsfwWindowScore() {
 function localNsfwColdStreak() {
     const recent = recentConversationMessages(NSFW_COLD_STREAK);
     return recent.length >= NSFW_COLD_STREAK
+        && !recent.some(isPendingAssistant)
         && recent.every((message) => localNsfwScore(message.mes) === 0);
+}
+
+let rewriteGeneration = null;
+let generationEvents = [];
+let lastCompletedAssistant = null;
+
+function isPendingAssistant(message) {
+    return message && !message.is_user && !message.is_system
+        && /^(?:\s|\.{3}|…)*$/.test(String(message.mes ?? ''));
+}
+
+function beginSceneGeneration(type, fromEvent = false, dryRun = false) {
+    if (dryRun) return;
+    const normalized = normalizeGenerationType(type);
+    if (fromEvent) generationEvents.push(normalized);
+    if (!ALLOWED_GENERATION_TYPES.has(normalized)) return;
+    // SFW의 생성 훅이 먼저 실행되어도 NSFW가 해제 판정을 하기 전에 담당을 보존한다.
+    globalThis.ttottoNsfwSceneBridge?.beginGeneration?.(normalized);
+    if (normalized !== 'swipe' && normalized !== 'regenerate') {
+        rewriteGeneration = null;
+    } else {
+        const context = getContext();
+        const removedReply = normalized === 'regenerate' && lastCompletedAssistant
+            && lastCompletedAssistant.metadata === context.chatMetadata
+            && !context.chat?.includes(lastCompletedAssistant.message);
+        if (removedReply && getChatMeta(false)?.nsfwSuspended) {
+            rewriteGeneration = { metadata: context.chatMetadata };
+        }
+        if (syncNsfwSuspension()) rewriteGeneration = { metadata: context.chatMetadata };
+    }
+}
+
+function holdsRewriteGeneration() {
+    return Boolean(rewriteGeneration && runtimeActive && getSettings().enabled
+        && rewriteGeneration.metadata === getContext().chatMetadata && getChatMeta(false)?.enabled);
+}
+
+function finishSceneGeneration(type) {
+    const normalized = typeof type === 'string' ? normalizeGenerationType(type) : generationEvents.at(-1);
+    const index = generationEvents.lastIndexOf(normalized);
+    if (index >= 0) generationEvents.splice(index, 1);
+    if (normalized === 'quiet') return false;
+    rewriteGeneration = null;
+    return true;
+}
+
+function finishReceivedGeneration() {
+    rewriteGeneration = null;
+    generationEvents = generationEvents.filter((type) => type === 'quiet');
 }
 
 function latestNsfwSnapshot() {
@@ -696,7 +746,7 @@ function syncNsfwSuspension({ notify = false } = {}) {
     // NSFW의 설정을 강제로 켜지 않으며, SFW는 자기 주입과 보조 분석만 중단한다.
     const detected = localNsfwWindowScore() >= localNsfwThreshold();
     const localSuspended = meta.nsfwSuspended ? !localNsfwColdStreak() : detected;
-    const shouldSuspend = delegated || delegationDraining || localSuspended;
+    const shouldSuspend = holdsRewriteGeneration() || delegated || delegationDraining || localSuspended;
 
     if (shouldSuspend && !meta.nsfwSuspended) {
         meta.nsfwSuspended = true;
@@ -1731,10 +1781,11 @@ function normalizeGenerationType(type) {
 function onGenerationStarted(type, options, dryRun) {
 
     if (dryRun) return;
+    beginSceneGeneration(type, true);
     const normalized = normalizeGenerationType(type);
     if (ALLOWED_GENERATION_TYPES.has(normalized)) {
 
-        prepareSceneInjection({ consumeBridge: false });
+        prepareSceneInjection({ consumeBridge: false, generationType: normalized });
     } else if (normalized === 'impersonate') {
         clearInjectedPrompt();
     }
@@ -1754,12 +1805,13 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
         }
         return;
     }
-    prepareSceneInjection();
+    prepareSceneInjection({ generationType });
 };
 
-function prepareSceneInjection({ consumeBridge = true } = {}) {
+function prepareSceneInjection({ consumeBridge = true, generationType } = {}) {
     clearInjectedPrompt();
     try {
+        beginSceneGeneration(generationType);
         const settings = getSettings();
         const meta = getChatMeta();
         const nsfwSuspended = syncNsfwSuspension();
@@ -2186,6 +2238,13 @@ function handleIncomingMessage(index) {
         updateUi();
         return;
     }
+
+    if (isPendingAssistant(message) || holdsRewriteGeneration()) {
+        syncNsfwSuspension();
+        updateUi();
+        return;
+    }
+    lastCompletedAssistant = { metadata: getContext().chatMetadata, message };
 
     const { changed, found, state } = harvestMessage(message);
     const suspended = syncNsfwSuspension({ notify: true });
@@ -3246,9 +3305,17 @@ function registerEvents() {
     };
 
     listen('GENERATION_STARTED', onGenerationStarted);
-    listen('MESSAGE_RECEIVED', (index) => schedulePostGenerationHarvest(index));
+    listen('MESSAGE_RECEIVED', (index) => {
+        finishReceivedGeneration();
+        schedulePostGenerationHarvest(index);
+    });
     // 스와이프·렌더 보험: ST 버전이나 번역 확장에 따라 메시지 추가/수정 이벤트 순서가 달라질 수 있다.
-    listen('GENERATION_ENDED', () => {
+    listen('GENERATION_ENDED', (type) => {
+        if (finishSceneGeneration(type)) schedulePostGenerationHarvest();
+    });
+    listen('GENERATION_STOPPED', () => {
+        rewriteGeneration = null;
+        generationEvents = [];
         schedulePostGenerationHarvest();
     });
     listen('CHARACTER_MESSAGE_RENDERED', (index) => schedulePostGenerationHarvest(index));
@@ -3256,6 +3323,9 @@ function registerEvents() {
     listen('MESSAGE_EDITED', (index) => schedulePostGenerationHarvest(index));
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
+        rewriteGeneration = null;
+        generationEvents = [];
+        lastCompletedAssistant = null;
         clearLegacyDiagnostics();
         clearTimeout(refineTimer);
         refineTimer = null;
@@ -3330,6 +3400,9 @@ export function onEnable() {
 
 export function onDisable() {
     runtimeActive = false;
+    rewriteGeneration = null;
+    generationEvents = [];
+    lastCompletedAssistant = null;
     clearTimeout(refineTimer);
     refineTimer = null;
     queuedRefineTarget = null;
