@@ -15,6 +15,12 @@ function nearby(left, right, span = NEAR) {
     return new RegExp(`(?:${left})${span}(?:${right})|(?:${right})${span}(?:${left})`, 'gi');
 }
 
+// 의복 마찰은 운동/세탁에도 등장한다. 같은 문단의 구체적인 성적 신체 반응이 있어야 인정한다.
+const EN_GENITAL_RESPONSE = nearby(String.raw`\b(?:cock|dick|penis|erection)\b`,
+    String.raw`\b(?:hard|stiff|rigid|erect|throb(?:s|bed|bing)?|aching|aroused)\b`);
+const KO_GENITAL_RESPONSE = nearby(String.raw`(?:성기|자지|발기)`,
+    String.raw`(?:발기|단단|팽팽|굳|빳빳|뻣뻣|욱신|발딱|꼿꼿)`, String.raw`[^.!?。！？\n]{0,80}?`);
+
 const RULES = [
     { label: '현재 명시적 행위', w: 4, re: /삽입(?:하|했|해|되|된|되는|중)|박아\s*넣|쑤셔\s*넣|사정(?:하|했|해|시키|하며|하는|하려)|오르가즘(?:에|을)\s*(?:도달|느끼)|질\s*(?:안|속)에\s*(?:넣|박)|\bpenetrat(?:e|es|ed|ing)\b|\bthrust(?:ed|ing|s)?\s+(?:inside|into|against)\b|\borgasm(?:s|ed|ing)\b|\bejaculat(?:e|es|ed|ing)\b|\bcame\s+(?:inside|over|on)\b|\bcoming\s+(?:inside|in\s+her|in\s+him)\b/gi },
     { label: '영어 구강 접촉', w: 4, re: nearby(EN_BODY, EN_ORAL) },
@@ -22,6 +28,14 @@ const RULES = [
     { label: '영어 직접 행동', w: 4, re: nearby(EN_BODY, String.raw`\b(?:fuck(?:s|ed|ing)?|thrust(?:s|ed|ing)?|insert(?:s|ed|ing)?)\b`) },
     { label: '영어 손 접촉', w: 4, re: nearby(EN_HAND, EN_INTIMATE), require: EN_MOTION },
     { label: '한국어 직접 접촉', w: 4, re: nearby(KO_BODY, KO_TOUCH, String.raw`[^.!?。！？\n]{0,80}?`) },
+    { label: '영어 의복·골반 마찰과 성적 반응', w: 4,
+        re: nearby(String.raw`\b(?:jeans|sweatpants|trousers|underwear|panties|boxers|crotch|groin|pelvis|hips?|lap)\b`,
+            String.raw`\b(?:rub(?:s|bed|bing)?|grind(?:s|ing)?|ground|friction|press(?:es|ed|ing)?|rock(?:s|ed|ing)?)\b`),
+        requireParagraph: EN_GENITAL_RESPONSE },
+    { label: '한국어 의복·골반 마찰과 성적 반응', w: 4,
+        re: nearby(String.raw`(?:청바지|트레이닝\s*(?:팬츠|바지)|바지|속옷|팬티|가랑이|아랫도리|사타구니|골반|치골)`,
+            String.raw`(?:문질|문지|비비|비벼|마찰|밀착|눌러|누르|맞대|밀어붙)`, String.raw`[^.!?。！？\n]{0,80}?`),
+        requireParagraph: KO_GENITAL_RESPONSE },
     { label: '신음 표기', w: 3, re: /하앙|흐응|아앙|흐읏|하아앙|응아|앗\s*…?\s*안|\bmoan(?:ed|ing|s)?\b|\bwhimper(?:ed|ing)?\b/gi },
     { label: '현재 탈의·밀착', w: 2, re: /(?:옷|속옷|팬티|브래지어|바지|치마)(?:을|를)?\s*(?:벗기|벗겨|내리)|\bgrind(?:s|ing)?\s+(?:against|on|into)\b|\bground\s+(?:against|on|into)\b|\bstraddl(?:e|es|ed|ing)\s+(?:her|him|them)\b/gi },
     { label: '성적 접촉 분위기', w: 1, re: /키스가\s*깊어|혀가\s*얽|목덜미에\s*입|귓불을\s*(?:물|빨|핥)|\bkiss(?:es|ed|ing)?\s+(?:deeply|hungrily)\b|\btongues?\s+(?:tangled|met)\b|\bhands?\s+(?:slid|moved)\s+(?:under|between)\b/gi },
@@ -33,7 +47,7 @@ function scoreScene(text, customKeywords = '') {
         .replace(/<(?:scene_state|sfw_scene)\b[^>]*>[\s\S]*$/gi, '');
     const hits = [];
     let score = 0;
-    for (const { label, re, w, require } of RULES) {
+    for (const { label, re, w, require, requireParagraph } of RULES) {
         re.lastIndex = 0;
         let match;
         let count = 0;
@@ -43,6 +57,14 @@ function scoreScene(text, customKeywords = '') {
                 const before = source.slice(Math.max(0, match.index - 180), match.index).match(/[^.!?。！？\n]*$/)[0];
                 const after = source.slice(re.lastIndex, re.lastIndex + 180).match(/^[^.!?。！？\n]*/)[0];
                 if (!require.test(before + match[0] + after)) continue;
+            }
+            if (requireParagraph) {
+                const before = source.slice(Math.max(0, match.index - 600), match.index)
+                    .split(/\n\s*\n/).at(-1);
+                const after = source.slice(re.lastIndex, re.lastIndex + 600)
+                    .split(/\n\s*\n/)[0];
+                requireParagraph.lastIndex = 0;
+                if (!requireParagraph.test(before + match[0] + after)) continue;
             }
             hits.push({ label, text: match[0], w });
             score += w;
@@ -79,7 +101,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.28';
+const EXTENSION_VERSION = '0.2.29';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -2482,7 +2504,8 @@ function renderStatePanel() {
     const intensityBadge = element('tsf-intensity');
     if (state?.intensity !== null && state?.intensity !== undefined) {
         intensityBadge.hidden = false;
-        intensityBadge.textContent = `📈 ${state.intensity}/10`;
+        intensityBadge.textContent = `📈 서사 강도 ${state.intensity}/10`;
+        intensityBadge.title = '일반 장면의 긴장·진행 강도입니다. NSFW의 성적 온도와 다른 값입니다.';
         intensityBadge.classList.toggle('is-hot', state.intensity >= INTENSITY_HIGH);
     } else {
         intensityBadge.hidden = true;
