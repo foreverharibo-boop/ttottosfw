@@ -101,7 +101,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.29';
+const EXTENSION_VERSION = '0.2.30';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -384,6 +384,165 @@ function getEventTypes(context = getContext()) {
     return context.eventTypes ?? context.event_types ?? {};
 }
 
+// BEGIN STATE TAG DISPLAY GUARD
+// 표시용 사본만 필터링한다. 채팅 원문·선택 스와이프·상태 수집에는 손대지 않는다.
+const DISPLAY_RULE_ID = MODULE_NAME === 'ttotto-nsfw'
+    ? 'c3d51f0b-6ad4-4aaa-8801-6ba5efec9a13' : '709b05fb-c531-40a8-8de7-206d2c4fc1ce';
+const DISPLAY_STYLE_ID = `${MODULE_NAME}-state-tag-display-guard`;
+const DISPLAY_TAG_NAMES = '(?:scene_state|sfw_scene)';
+const DISPLAY_OPEN = '(?:<|&lt;)';
+const DISPLAY_CLOSE = '(?:>|&gt;)';
+const DISPLAY_PARTIAL_NAMES = ['scene_state', 'sfw_scene'].flatMap((name) =>
+    Array.from({ length: name.length - 1 }, (_, i) => name.slice(0, i + 1))).join('|');
+const DISPLAY_TAG_BODY = `${DISPLAY_OPEN}(${DISPLAY_TAG_NAMES})\\b[^>]*?${DISPLAY_CLOSE}[\\s\\S]*?(?:${DISPLAY_OPEN}\\/\\1\\s*${DISPLAY_CLOSE}|$)`
+    + `|${DISPLAY_OPEN}\\/?${DISPLAY_TAG_NAMES}\\b[^>]*?(?:${DISPLAY_CLOSE}|$)`;
+const DISPLAY_TAG_PATTERN = `(?:\\x60{3}(?:json)?[ \t]*(?:\\r?\\n)?[ \t]*)?(?:${DISPLAY_TAG_BODY}|${DISPLAY_OPEN}\\/?(?:${DISPLAY_PARTIAL_NAMES})$)(?:[ \t\\r\\n]*\\x60{3})?`;
+const DISPLAY_TAG_REGEX = new RegExp(DISPLAY_TAG_PATTERN, 'gi');
+let displayGuardActive = false;
+let displayFormatterInstalled = null;
+let displayObserver = null;
+
+function stripStateTagsForDisplay(text) {
+    // JSON 코드 블록 안의 태그도 같은 문자열 단계에서 숨긴다. 다른 코드 블록은 유지한다.
+    return String(text ?? '').replace(DISPLAY_TAG_REGEX, '');
+}
+
+function displayFormattingHook(text, context = {}) {
+    if (!displayGuardActive || context.isUser || context.isSystem || context.isReasoning) return text;
+    return stripStateTagsForDisplay(text);
+}
+
+function removeOwnedDisplayRule() {
+    const context = getContext();
+    const scripts = context.extensionSettings?.regex;
+    if (!Array.isArray(scripts)) return;
+    const index = scripts.findIndex((script) => script?.id === DISPLAY_RULE_ID);
+    if (index < 0) return;
+    scripts.splice(index, 1);
+    context.saveSettingsDebounced?.();
+}
+
+function ensureDisplayRule() {
+    const context = getContext();
+    const settings = context.extensionSettings;
+    if (settings.regex !== undefined && !Array.isArray(settings.regex)) return;
+    settings.regex ??= [];
+    const rule = {
+        id: DISPLAY_RULE_ID,
+        scriptName: `${MODULE_NAME} · 상태 태그 숨김 (표시 전용)`,
+        findRegex: `/${DISPLAY_TAG_PATTERN}/gi`, replaceString: '', trimStrings: [],
+        placement: [2], disabled: false, markdownOnly: true, promptOnly: false,
+        runOnEdit: true, substituteRegex: 0, minDepth: null, maxDepth: null,
+    };
+    const existing = settings.regex.find((script) => script?.id === DISPLAY_RULE_ID);
+    if (existing && JSON.stringify(existing) === JSON.stringify(rule)) return;
+    if (existing) Object.assign(existing, rule);
+    else settings.regex.push(rule);
+    context.saveSettingsDebounced?.();
+}
+
+function scrubRenderedStateTags(root) {
+    if (!displayGuardActive || !root?.closest?.('#chat')) return;
+    const messageElement = root.closest('.mes');
+    if (!messageElement || messageElement.getAttribute('is_user') === 'true'
+        || messageElement.getAttribute('is_system') === 'true') return;
+    const walker = document.createTreeWalker(root, 4);
+    const nodes = [];
+    let text = '';
+    let node;
+    while ((node = walker.nextNode())) {
+        nodes.push({ node, start: text.length, end: text.length + node.data.length });
+        text += node.data;
+    }
+    if (!text) return;
+    const ranges = [...text.matchAll(DISPLAY_TAG_REGEX)].map((match) => [match.index, match.index + match[0].length]);
+    // HTML 정화기가 알 수 없는 태그만 벗겨낸 경우, 원문에서 확인된 기계용 내용만 숨긴다.
+    // 일반 JSON이나 대화 본문을 형태만 보고 삭제하지 않는다.
+    const messageId = messageElement.getAttribute('mesid');
+    const index = messageId == null || messageId.trim() === '' ? NaN : Number(messageId);
+    const message = Number.isInteger(index) ? getContext().chat?.[index] : null;
+    if (message && !message.is_user && !message.is_system) {
+        const raw = String(message.mes ?? '');
+        for (const match of raw.matchAll(/<(scene_state|sfw_scene)\b[^>]*>([\s\S]*?)(?:<\/\1\s*>|$)/gi)) {
+            const payload = match[2].replace(new RegExp(`${DISPLAY_OPEN}\\/(?:${DISPLAY_TAG_NAMES}|${DISPLAY_PARTIAL_NAMES})$`, 'i'), '').trim();
+            if (!payload) continue;
+            const position = text.lastIndexOf(payload);
+            if (position >= 0) ranges.push([position, position + payload.length]);
+        }
+    }
+    // 겹치는 범위를 합치고 뒤에서부터 제거해 앞쪽 노드의 오프셋과 서식을 보존한다.
+    ranges.sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    for (const range of ranges) {
+        const last = merged.at(-1);
+        if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+        else merged.push(range);
+    }
+    for (const [start, end] of merged.reverse()) {
+        const first = nodes.find((item) => item.start <= start && item.end > start);
+        const last = nodes.find((item) => item.start < end && item.end >= end);
+        if (!first || !last || !first.node.isConnected || !last.node.isConnected) continue;
+        const range = document.createRange();
+        range.setStart(first.node, start - first.start);
+        range.setEnd(last.node, end - last.start);
+        range.deleteContents();
+    }
+}
+
+function startDisplayObserver() {
+    if (displayObserver || typeof MutationObserver !== 'function' || !document.documentElement) return;
+    const style = document.createElement('style');
+    style.id = DISPLAY_STYLE_ID;
+    style.textContent = '#chat .mes:not([is_user="true"]):not([is_system="true"]) .mes_text scene_state, '
+        + '#chat .mes:not([is_user="true"]):not([is_system="true"]) .mes_text sfw_scene { display:none !important; }';
+    (document.head ?? document.documentElement).append(style);
+    displayObserver = new MutationObserver((records) => {
+        if (!displayGuardActive) return;
+        const roots = new Set();
+        const collect = (node, descendants = false) => {
+            const element = node?.nodeType === 1 ? node : node?.parentElement;
+            const root = element?.closest?.('#chat .mes_text');
+            if (root) roots.add(root);
+            if (descendants) element?.querySelectorAll?.('.mes_text').forEach((item) => {
+                if (item.closest('#chat')) roots.add(item);
+            });
+        };
+        for (const record of records) {
+            collect(record.target);
+            for (const node of record.addedNodes ?? []) collect(node, true);
+        }
+        roots.forEach(scrubRenderedStateTags);
+    });
+    // MutationObserver callbacks run at the microtask checkpoint before the browser paints.
+    // 구버전·Regex 비활성·번역 확장의 직접 DOM 갱신에도 표시 노드만 정리한다.
+    displayObserver.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    document.querySelectorAll('#chat .mes_text').forEach(scrubRenderedStateTags);
+}
+
+function stopStateTagDisplayGuard() {
+    displayGuardActive = false;
+    displayObserver?.disconnect();
+    displayObserver = null;
+    document.getElementById(DISPLAY_STYLE_ID)?.remove();
+    removeOwnedDisplayRule();
+    // 포맷 훅은 모듈당 한 번만 등록한다. 비활성 중에는 원문을 그대로 반환한다.
+}
+
+function syncStateTagDisplayGuard() {
+    displayGuardActive = Boolean(runtimeActive && getSettings().enabled);
+    if (!displayGuardActive) { stopStateTagDisplayGuard(); return; }
+    const formatter = getContext().messageFormatter;
+    if (typeof formatter?.addHook === 'function' && formatter !== displayFormatterInstalled) {
+        formatter.addHook(displayFormattingHook, { stage: 'beforeRegex', order: 0 });
+        displayFormatterInstalled = formatter;
+    }
+    // 정식 버전에서는 표시 전용 Regex, 새 포맷터가 있는 버전에서는 훅도 함께 보호한다.
+    // 사용자의 기존 Regex나 Regex 전체 사용 여부는 바꾸지 않는다.
+    ensureDisplayRule();
+    startDisplayObserver();
+}
+// END STATE TAG DISPLAY GUARD
+
 function getSettings() {
     const context = getContext();
     if (!context.extensionSettings[MODULE_NAME]) {
@@ -434,6 +593,7 @@ function getSettings() {
 }
 
 function saveSettings() {
+    syncStateTagDisplayGuard();
     getContext().saveSettingsDebounced();
 }
 
@@ -3281,6 +3441,7 @@ async function loadSettingsHtml() {
 }
 
 async function initializeUi() {
+    syncStateTagDisplayGuard();
     if (uiReady && document.getElementById('ttotto-sfw-settings')) {
         addWandButton();
         updateUi();
@@ -3328,6 +3489,7 @@ async function initializeUi() {
 // ───────────────────────── 이벤트 등록/수명주기 ─────────────────────────
 
 function registerEvents() {
+    syncStateTagDisplayGuard();
     if (eventsRegistered) return;
     const context = getContext();
     const events = getEventTypes(context);
@@ -3434,6 +3596,7 @@ export function onEnable() {
 
 export function onDisable() {
     runtimeActive = false;
+    stopStateTagDisplayGuard();
     rewriteGeneration = null;
     generationEvents = [];
     lastCompletedAssistant = null;
@@ -3456,6 +3619,7 @@ export function onDisable() {
 }
 
 export function onClean() {
+    stopStateTagDisplayGuard();
     clearTimeout(refineTimer);
     refineTimer = null;
     queuedRefineTarget = null;
@@ -3477,6 +3641,7 @@ export function onClean() {
 }
 
 const bootContext = getContext();
+syncStateTagDisplayGuard();
 const bootEvents = getEventTypes(bootContext);
 // 이벤트가 아직 발생하지 않은 초기 로드와 이미 발생한 늦은 로드를 모두 처리한다.
 for (const event of new Set([bootEvents.APP_INITIALIZED, bootEvents.APP_READY].filter(Boolean))) {
