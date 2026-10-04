@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.37';
+const EXTENSION_VERSION = '0.2.38';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -477,7 +477,7 @@ function diagnosticTextShape(text) {
         openTag: /<sfw_scene\b/i.test(text), closeTag: /<\/sfw_scene\s*>/i.test(text),
         escapedTag: /&lt;sfw_scene\b/i.test(text), nsfwTag: /<scene_state\b/i.test(text),
         parsed: Boolean(state), characters: Object.keys(state?.characters ?? {}).length,
-        objects: Object.keys(state?.importantObjects ?? {}).length, ...diagnosticNsfwReport(text),
+        objects: Object.keys(state?.importantObjects ?? {}).length, nextCandidates: state?.next?.length ?? 0, ...diagnosticNsfwReport(text),
         missing: state ? stateCompletenessIssues(state) : ['state'],
     };
 }
@@ -702,7 +702,7 @@ function diagnosticResponse(message, index) {
         escapedTag: /&lt;sfw_scene\b/i.test(text), nsfwTag: /<scene_state\b/i.test(text),
         parsed: Boolean(state), ...diagnosticCache(message),
         characters: Object.keys(state?.characters ?? {}).length,
-        objects: Object.keys(state?.importantObjects ?? {}).length, ...diagnosticNsfwReport(text),
+        objects: Object.keys(state?.importantObjects ?? {}).length, nextCandidates: state?.next?.length ?? 0, ...diagnosticNsfwReport(text),
         missing: state ? stateCompletenessIssues(state) : ['state'], ...diagnosticState(),
     });
 }
@@ -1640,6 +1640,7 @@ function diagnosticCache(message) {
         savedBodyChars: Number(String(snapshot?.messageSignature ?? '').split(':')[1] ?? -1),
         savedCharacters: Object.keys(snapshot?.state?.characters ?? {}).length,
         savedObjects: Object.keys(snapshot?.state?.importantObjects ?? {}).length,
+        savedNextCandidates: snapshot?.state?.next?.length ?? 0,
         legacySignature: Boolean(snapshot && snapshot.signatureVersion !== 2),
     };
 }
@@ -1991,10 +1992,22 @@ function buildStateLines(state) {
     return lines;
 }
 
-// 최신 스냅샷의 다음 전개 후보 (반복 금지 목록·무시 목록과 겹치는 건 제외)
-function nextBeatCandidates() {
+// Future suggestions expire with their reply. Unlike continuity facts, they
+// must never fall back to a report from an older message or another swipe.
+function nextBeatReport({ forDisplay = false } = {}) {
+    const meta = getChatMeta(false);
+    const message = assistantMessages().at(-1);
+    if (meta?.nsfwSuspended || !message || isPendingAssistant(message)) return { state: null, source: 'none' };
+    const snapshot = snapshotForMessage(message);
+    if (snapshotMatchesMessage(message, snapshot)) return { state: snapshot.state, source: 'tag' };
+    if (forDisplay && snapshot?.state) return { state: snapshot.state, source: 'body-changed' };
+    return { state: null, source: 'none' };
+}
+
+// 최신 답변의 후보만 필터링한다. 미검증 저장값은 화면에서만 확인한다.
+function nextBeatCandidates(options = {}) {
     const ignored = ignoredActSet();
-    const { state } = effectiveState();
+    const { state } = nextBeatReport(options);
     if (!state?.next?.length) return [];
     const settings = getSettings();
     const bannedActs = recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow)
@@ -3360,7 +3373,7 @@ function renderStatePanel() {
     const nextList = element('tsf-next-list');
     nextList.replaceChildren();
     const targetActive = slowBurnTargetProgress().active;
-    const beats = settings.nextBeatHints && !targetActive ? nextBeatCandidates() : [];
+    const beats = settings.nextBeatHints && !targetActive ? nextBeatCandidates({ forDisplay: true }) : [];
     for (const beat of beats) {
         const chip = document.createElement('span');
         chip.className = 'tsf-act-chip tsf-next-chip';
@@ -3384,6 +3397,9 @@ function renderStatePanel() {
     const nextSection = element('tsf-next-section');
     nextSection.hidden = !settings.nextBeatHints || targetActive;
     element('tsf-next-empty').hidden = !settings.nextBeatHints || targetActive || beats.length > 0;
+    element('tsf-next-source').textContent = nextBeatReport({ forDisplay: true }).source === 'body-changed'
+        ? '최신 답변에 저장된 후보 · 저장 후 본문 변경으로 현재 적용 보류'
+        : beats.length ? '최신 답변에서 수집한 후보' : '최신 답변의 전개 후보 없음 · 과거 후보는 재사용하지 않아요.';
 
     // 수동 금지 목록
     const customList = element('tsf-custom-ban-list');

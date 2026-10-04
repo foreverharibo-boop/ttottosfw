@@ -51,7 +51,7 @@ function setup({ installed = true, paired = false, owner = false, mode = 'auto',
             .replaceAll('export function ', 'function ').replace('import.meta.url', "'file:///extension/index.js'");
         vm.runInContext(`(function(){${script}\nglobalThis.${name}={${exports}};})();`, env);
     };
-    const sfw = () => load(sfwSource, 'sfw', 'getSettings,getChatMeta,scoreScene,syncNsfwSuspension,isFullyArmed,handleIncomingMessage,effectiveState,prepareSceneInjection,runRefine,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,stateForDisplay,legacyMessageStateSignature');
+    const sfw = () => load(sfwSource, 'sfw', 'getSettings,getChatMeta,scoreScene,syncNsfwSuspension,isFullyArmed,handleIncomingMessage,effectiveState,prepareSceneInjection,runRefine,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,stateForDisplay,legacyMessageStateSignature,nextBeatCandidates,nextBeatReport');
     const nsfw = () => load(nsfwSource, 'nsfw', 'getSettings,getChatMeta,handleIncomingMessage,isFullyArmed,prepareSceneInjection,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration');
     if (paired) {
         if (loadOrder === 'sfw-first') { sfw(); nsfw(); } else { nsfw(); sfw(); }
@@ -308,4 +308,62 @@ test('continued NSFW ownership still prevents a conditional SFW report from beco
     assert.equal(r.context.chat[1].extra?.ttottoSfw, undefined);
     assert.equal(r.env.sfw.isFullyArmed(), false);
     assert.equal(r.requests, 0);
+});
+
+
+test('changed latest reply displays its own candidates and never injects older suggestions', () => {
+    const r = setup({ chat: [msg('Library discussion.' + stateTag({ ...sfwReport, next: ['Find a library book'] }))] });
+    r.env.sfw.handleIncomingMessage(0);
+    r.context.chat.push(msg('Train arrives.' + stateTag({ ...sfwReport, next: ['Board the departing train'] })));
+    r.env.sfw.handleIncomingMessage(1);
+    r.context.chat[1].mes = 'Train arrives at a different platform.';
+    r.env.sfw.handleIncomingMessage(1);
+    assert.equal(r.env.sfw.effectiveState().state.next[0].en, 'Find a library book');
+    assert.equal(r.env.sfw.nextBeatCandidates({ forDisplay: true })[0].en, 'Board the departing train');
+    assert.equal(r.env.sfw.nextBeatReport({ forDisplay: true }).source, 'body-changed');
+    assert.equal(r.env.sfw.nextBeatCandidates().length, 0);
+    r.env.sfw.prepareSceneInjection({ generationType: 'normal' });
+    assert.ok(!r.prompts.ttotto_sfw_continuity.includes('SUGGESTED NEXT BEATS'));
+    assert.ok(!r.prompts.ttotto_sfw_continuity.includes('Find a library book'));
+    assert.equal(r.requests, 0);
+});
+
+test('valid latest candidates are available to both display and generation', () => {
+    const r = setup({ chat: [msg('Train arrives.' + stateTag({ ...sfwReport, next: ['Board the departing train'] }))] });
+    r.env.sfw.handleIncomingMessage(0);
+    assert.equal(r.env.sfw.nextBeatCandidates()[0].en, 'Board the departing train');
+    assert.equal(r.env.sfw.nextBeatCandidates({ forDisplay: true })[0].en, 'Board the departing train');
+    r.env.sfw.prepareSceneInjection({ generationType: 'normal' });
+    assert.ok(r.prompts.ttotto_sfw_continuity.includes('SUGGESTED NEXT BEATS'));
+});
+
+test('missing latest report or another swipe never resurrects earlier candidates', () => {
+    const r = setup({ chat: [msg('Library discussion.' + stateTag(sfwReport))] });
+    r.env.sfw.handleIncomingMessage(0);
+    r.meta.manualState = { state: r.env.sfw.effectiveState().state, at: Date.now() + 100, source: 'ai-refine' };
+    r.context.chat.push(msg('Unreported new reply.'));
+    assert.equal(r.env.sfw.nextBeatCandidates({ forDisplay: true }).length, 0);
+    assert.equal(r.env.sfw.nextBeatCandidates().length, 0);
+    r.context.chat.pop();
+    r.context.chat[0].swipe_id = 1;
+    assert.equal(r.env.sfw.nextBeatCandidates({ forDisplay: true }).length, 0);
+    r.context.chat[0].swipe_id = 0;
+    assert.equal(r.env.sfw.nextBeatCandidates()[0].en, 'Rest');
+});
+
+test('an empty latest candidate list clears previous suggestions', () => {
+    const r = setup({ chat: [msg('Earlier reply.' + stateTag(sfwReport))] });
+    r.env.sfw.handleIncomingMessage(0);
+    r.context.chat.push(msg('Later reply.' + stateTag({ ...sfwReport, next: [] })));
+    r.env.sfw.handleIncomingMessage(1);
+    assert.equal(r.env.sfw.nextBeatCandidates({ forDisplay: true }).length, 0);
+    assert.equal(r.env.sfw.nextBeatCandidates().length, 0);
+});
+
+test('NSFW suspension hides SFW suggestions even when its saved report matches', () => {
+    const r = setup({ chat: [msg('Earlier reply.' + stateTag(sfwReport))] });
+    r.env.sfw.handleIncomingMessage(0);
+    r.meta.nsfwSuspended = true;
+    assert.equal(r.env.sfw.nextBeatCandidates({ forDisplay: true }).length, 0);
+    assert.equal(r.env.sfw.nextBeatCandidates().length, 0);
 });
