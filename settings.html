@@ -396,6 +396,22 @@
           </select>
           <small>위에서 Vertex 연결 프로필을 선택했을 때만 적용돼요. 익스프레스 키를 쓰는데 서비스 계정 JSON 오류가 나면 Express를 선택하세요. 메인 연결과 저장된 프리셋은 바꾸지 않아요.</small>
         </label>
+        <details class="tsf-field">
+          <summary><strong>수집 진단 기록</strong></summary>
+          <label class="tsf-setting-row" for="tsf-diagnostics-enabled">
+            <span><strong>진단 기록 켜기</strong><small>수집이 멈출 때 켠 뒤 새 답변 한 번으로 재현해 주세요. 추가 AI 호출은 없어요.</small></span>
+            <input id="tsf-diagnostics-enabled" type="checkbox">
+          </label>
+          <small>주입 등록 → 요청 내 지시 확인 → 수집 시점의 태그 상태 → 저장·건너뜀 → 보정 여부를 기록해요. 요청 관찰은 서버·모델 수신을 보장하지 않으며, 태그 없음은 SFW가 읽은 시점의 결과예요.</small>
+          <small>API 키·대화 본문·인물 이름은 담지 않아요. 최근 150건만 메모리에 유지하고 새로고침하면 지워져요. 문제 재현 후 먼저 복사하거나 내려받아 주세요.</small>
+          <small id="tsf-diagnostic-status">기록 꺼짐</small>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            <button id="tsf-diagnostic-copy" class="menu_button" type="button">진단 기록 복사</button>
+            <button id="tsf-diagnostic-download" class="menu_button" type="button">진단 기록 다운로드</button>
+            <button id="tsf-diagnostic-clear" class="menu_button" type="button">기록 비우기</button>
+          </div>
+          <textarea id="tsf-diagnostic-log" class="text_pole" rows="8" readonly aria-label="수집 진단 기록" style="width:100%;font-family:monospace"></textarea>
+        </details>
       </section>
     </div>
   </div>
