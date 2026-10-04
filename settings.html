@@ -386,7 +386,18 @@
           <select id="tsf-refine-profile" class="text_pole"></select>
           <small>자동·수동 상태 보정에만 쓰는 연결이에요. 지정하지 않으면 현재 연결을 사용하고, 저렴한 모델을 추천해요.</small>
         </label>
+
+        <label class="tsf-field" for="tsf-refine-vertex-auth">
+          <span>보정용 Vertex 인증 방식</span>
+          <select id="tsf-refine-vertex-auth" class="text_pole">
+            <option value="profile">기존 연결 설정 따르기</option>
+            <option value="express">Express — API 키</option>
+            <option value="full">Full — 서비스 계정 JSON</option>
+          </select>
+          <small>위에서 Vertex 연결 프로필을 선택했을 때만 적용돼요. 익스프레스 키를 쓰는데 서비스 계정 JSON 오류가 나면 Express를 선택하세요. 메인 연결과 저장된 프리셋은 바꾸지 않아요.</small>
+        </label>
       </section>
     </div>
   </div>
 </div>
+

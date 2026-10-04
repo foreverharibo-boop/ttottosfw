@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.31';
+const EXTENSION_VERSION = '0.2.32';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -350,6 +350,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     exitBridge: true, // 해제 직후 한 번, 장면 마무리 지시 주입
     autoRefine: true,
     refineProfileId: '',
+    refineVertexAuthMode: 'profile',
     refineMaxTokens: 3000,
     refineContextMessages: 8,
 });
@@ -2159,6 +2160,20 @@ function isTokenLimitError(error) {
     return /max_?output_?tokens|max_tokens|maxOutputTokens|supported range|output token/i.test(String(error?.message ?? error ?? ''));
 }
 
+function refineProfileOverrides(context, service, profileId, settings) {
+    const mode = settings.refineVertexAuthMode;
+    if (!['express', 'full'].includes(mode)) return {};
+    const profile = typeof service.getProfile === 'function'
+        ? service.getProfile(profileId)
+        : context.extensionSettings?.connectionManager?.profiles?.find((item) => item.id === profileId);
+    const api = typeof service.validateProfile === 'function'
+        ? service.validateProfile(profile) : context.CONNECT_API_MAP?.[profile?.api];
+    if (!api) throw new Error('보정 프로필의 API 종류를 확인할 수 없어요. 연결 프로필을 다시 선택해 주세요.');
+    // Override only this analysis request. Never change the shared preset,
+    // active connection, secret selection, or another provider's payload.
+    return api.source === 'vertexai' ? { vertexai_auth_mode: mode } : {};
+}
+
 async function requestRefine(signal) {
     const context = getContext();
     const settings = getSettings();
@@ -2178,7 +2193,8 @@ async function requestRefine(signal) {
                 if (!service || typeof service.sendRequest !== 'function') {
                     throw new Error('Connection Profiles 서비스를 사용할 수 없습니다.');
                 }
-                const result = await service.sendRequest(profileId, prompt, tokens, { stream: false, signal, extractData: true });
+                const overrides = refineProfileOverrides(context, service, profileId, settings);
+                const result = await service.sendRequest(profileId, prompt, tokens, { stream: false, signal, extractData: true }, overrides);
                 if (typeof result === 'string') return result;
                 if (result && typeof result.content === 'string') return result.content;
                 throw new Error('보정 분석 연결 프로필이 텍스트를 반환하지 않았습니다.');
@@ -3042,6 +3058,11 @@ function updateUi() {
         element('tsf-dialogue-window').disabled = !settings.dialogueBeatGuard;
         element('tsf-dialogue-window-value').textContent = `${settings.dialogueWindow}개`;
         element('tsf-auto-refine').checked = Boolean(settings.autoRefine);
+        const authSelect = element('tsf-refine-vertex-auth');
+        if (authSelect) {
+            authSelect.value = ['express', 'full'].includes(settings.refineVertexAuthMode) ? settings.refineVertexAuthMode : 'profile';
+            authSelect.disabled = !String(settings.refineProfileId ?? '').trim();
+        }
 
         const armed = isSupervising();
         element('tsf-header-status').textContent = !settings.enabled
@@ -3154,6 +3175,7 @@ function bindUi() {
     bindSetting('tsf-exit-bridge', 'exitBridge', Boolean);
     bindSetting('tsf-auto-refine', 'autoRefine', Boolean);
     bindSetting('tsf-refine-profile', 'refineProfileId', String);
+    bindSetting('tsf-refine-vertex-auth', 'refineVertexAuthMode', String);
 
     const slider = element('tsf-repeat-window');
     slider.addEventListener('input', () => {
