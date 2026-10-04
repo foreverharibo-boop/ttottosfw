@@ -51,7 +51,7 @@ function setup({ installed = true, paired = false, owner = false, mode = 'auto',
             .replaceAll('export function ', 'function ').replace('import.meta.url', "'file:///extension/index.js'");
         vm.runInContext(`(function(){${script}\nglobalThis.${name}={${exports}};})();`, env);
     };
-    const sfw = () => load(sfwSource, 'sfw', 'getSettings,getChatMeta,scoreScene,syncNsfwSuspension,isFullyArmed,handleIncomingMessage,effectiveState,prepareSceneInjection,runRefine,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration');
+    const sfw = () => load(sfwSource, 'sfw', 'getSettings,getChatMeta,scoreScene,syncNsfwSuspension,isFullyArmed,handleIncomingMessage,effectiveState,prepareSceneInjection,runRefine,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,stateForDisplay,legacyMessageStateSignature');
     const nsfw = () => load(nsfwSource, 'nsfw', 'getSettings,getChatMeta,handleIncomingMessage,isFullyArmed,prepareSceneInjection,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration');
     if (paired) {
         if (loadOrder === 'sfw-first') { sfw(); nsfw(); } else { nsfw(); sfw(); }
@@ -223,3 +223,46 @@ for (const loadOrder of ['sfw-first', 'nsfw-first']) {
         r.unchanged();
     });
 }
+
+test('ordinary collection survives CRLF, line-end spaces and appended translation without another API call', () => {
+    const r = setup({ chat: [msg('First line.  \r\nSecond line.\r\n' + stateTag(sfwReport))] });
+    r.env.sfw.handleIncomingMessage(0);
+    r.context.chat[0].mes = 'First line.\nSecond line.\n\n번역문\n첫째 줄. 둘째 줄.';
+    r.env.sfw.handleIncomingMessage(0);
+    assert.equal(r.env.sfw.effectiveState().source, 'tag');
+    assert.equal(Object.keys(r.env.sfw.effectiveState().state.characters).length, 1);
+    assert.equal(r.requests, 0);
+    assert.equal(r.timers.size, 0);
+});
+test('removing a trailing NSFW machine block does not invalidate a saved SFW report', () => {
+    const r = setup({ chat: [msg('Ordinary conversation.\n\n```json\n' + heatTag(0) + '\n```\n\n' + stateTag(sfwReport))] });
+    r.env.sfw.handleIncomingMessage(0);
+    r.context.chat[0].mes = 'Ordinary conversation.';
+    r.env.sfw.handleIncomingMessage(0);
+    assert.equal(r.env.sfw.effectiveState().source, 'tag');
+});
+test('genuinely changed body remains unverified but its saved report is available for inspection', () => {
+    const r = setup({ chat: [msg('A rests at the hotel.' + stateTag(sfwReport))] });
+    r.env.sfw.handleIncomingMessage(0);
+    r.context.chat[0].mes = 'A left for a different town.';
+    r.env.sfw.handleIncomingMessage(0);
+    assert.equal(r.env.sfw.effectiveState().state, null);
+    assert.equal(r.env.sfw.stateForDisplay().source, 'body-changed');
+    assert.equal(r.env.sfw.stateForDisplay().state.location.en, 'Hotel');
+    assert.equal(r.requests, 0);
+    r.context.chat[0].swipe_id = 1;
+    assert.equal(r.env.sfw.stateForDisplay().state, null);
+    r.context.chat[0].swipe_id = 0;
+    r.context.chat[0].mes += stateTag({ ...sfwReport, location: 'New town' });
+    r.env.sfw.handleIncomingMessage(0);
+    assert.equal(r.env.sfw.stateForDisplay().source, 'tag');
+    assert.equal(r.env.sfw.effectiveState().state.location.en, 'New town');
+});
+test('legacy saved reports remain valid when their existing signature matches', () => {
+    const r = setup({ chat: [msg('A rests.  \r\nB sits.\n' + stateTag(sfwReport))] });
+    r.env.sfw.handleIncomingMessage(0);
+    const saved = r.context.chat[0].extra.ttottoSfw.swipes['0'];
+    delete saved.signatureVersion;
+    saved.messageSignature = r.env.sfw.legacyMessageStateSignature(r.context.chat[0]);
+    assert.equal(r.env.sfw.effectiveState().source, 'tag');
+});

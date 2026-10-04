@@ -114,3 +114,23 @@ test('Request object body is observed through a clone and remains usable by the 
     await new Promise(resolve => setTimeout(resolve, 20));
     assert.ok(r.rows().some(e => e.stage === 'request_observed' && e.data.readable));
 });
+
+test('post-save mismatch reports saved characters and normalized lengths without exposing text', () => {
+    const r = runtime();
+    r.context.chat.push({ mes: 'PRIVATE BODY\n' + stateTag });
+    r.api.handleIncomingMessage(0);
+    const saved = r.rows().find(e => e.stage === 'collection_result').data;
+    assert.equal(saved.saved, true);
+    assert.equal(saved.cached, true);
+    assert.equal(saved.bodyChars, saved.savedBodyChars);
+    assert.equal(saved.savedCharacters, 1);
+    r.context.chat[0].mes = 'CHANGED PRIVATE BODY';
+    r.api.handleIncomingMessage(0);
+    const invalid = r.rows().find(e => e.stage === 'cache_invalidated').data;
+    assert.equal(invalid.reason, 'body_signature_mismatch');
+    assert.equal(invalid.saved, true);
+    assert.equal(invalid.cached, false);
+    assert.equal(invalid.savedCharacters, 1);
+    assert.notEqual(invalid.bodyChars, invalid.savedBodyChars);
+    for (const text of ['PRIVATE BODY', 'PRIVATE_NAME', 'PRIVATE ROOM', 'PRIVATE ACT']) assert.ok(!r.api.diagnosticReport().includes(text));
+});

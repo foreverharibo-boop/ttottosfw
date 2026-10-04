@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.33';
+const EXTENSION_VERSION = '0.2.34';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -506,7 +506,6 @@ function diagnosticResponse(message, index) {
     if (!diagnosticsEnabled()) return;
     const text = String(message.mes ?? '');
     const state = parseStateFromText(text);
-    const snapshot = snapshotForMessage(message);
     let reason = 'missing_tag';
     if (/<sfw_scene\b/i.test(text)) {
         reason = /<\/sfw_scene\s*>/i.test(text) ? 'invalid_tag' : 'unclosed_tag';
@@ -527,7 +526,7 @@ function diagnosticResponse(message, index) {
         message: index, swipe: currentSwipeIndex(message), chars: text.length,
         openTag: /<sfw_scene\b/i.test(text), closeTag: /<\/sfw_scene\s*>/i.test(text),
         escapedTag: /&lt;sfw_scene\b/i.test(text), nsfwTag: /<scene_state\b/i.test(text),
-        parsed: Boolean(state), cached: Boolean(snapshot?.state && snapshot.messageSignature === messageStateSignature(message)),
+        parsed: Boolean(state), ...diagnosticCache(message),
         characters: Object.keys(state?.characters ?? {}).length,
         missing: state ? stateCompletenessIssues(state) : ['state'], ...diagnosticState(),
     });
@@ -1097,7 +1096,7 @@ function latestCurrentSfwSnapshot() {
     const message = assistantMessages().at(-1);
     if (!message || isPendingAssistant(message)) return null;
     const snapshot = snapshotForMessage(message);
-    return snapshot?.state && snapshot.messageSignature === messageStateSignature(message) ? snapshot : null;
+    return snapshotMatchesMessage(message, snapshot) ? snapshot : null;
 }
 
 function latestScenePanelState() {
@@ -1412,12 +1411,43 @@ function currentSwipeIndex(message) {
     return Number.isInteger(message?.swipe_id) ? message.swipe_id : 0;
 }
 
-function messageStateSignature(message) {
+function legacyMessageStateSignature(message) {
     const swipeIndex = currentSwipeIndex(message);
     const fullText = stripDetectorTags(message?.mes);
     const translationMarker = fullText.search(/\r?\n\s*번역문\s*\r?\n/i);
     const text = translationMarker >= 0 ? fullText.slice(0, translationMarker) : fullText;
     return `${swipeIndex}:${text.length}:${messageTextHash(text)}`;
+}
+
+function stateRecordBody(text) {
+    // Strip machine blocks before normalizing their leftover whitespace. Cutting
+    // an appended translation must not leave a different trailing newline.
+    const clean = stripDetectorTags(String(text ?? '').replace(/```(?:json)?\s*<scene_state\b[^>]*>[\s\S]*?<\/scene_state>\s*```/gi, ''));
+    const marker = clean.search(/\r?\n\s*번역문\s*\r?\n/i);
+    return (marker >= 0 ? clean.slice(0, marker) : clean)
+        .replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trimEnd();
+}
+
+function messageStateSignature(message) {
+    const text = stateRecordBody(message?.mes);
+    return `${currentSwipeIndex(message)}:${text.length}:${messageTextHash(text)}`;
+}
+
+function snapshotMatchesMessage(message, snapshot = snapshotForMessage(message)) {
+    if (!snapshot?.state) return false;
+    return snapshot.messageSignature === messageStateSignature(message)
+        || (snapshot.signatureVersion !== 2 && snapshot.messageSignature === legacyMessageStateSignature(message));
+}
+
+function diagnosticCache(message) {
+    const snapshot = snapshotForMessage(message);
+    return {
+        saved: Boolean(snapshot?.state), cached: snapshotMatchesMessage(message, snapshot),
+        bodyChars: stateRecordBody(message?.mes).length,
+        savedBodyChars: Number(String(snapshot?.messageSignature ?? '').split(':')[1] ?? -1),
+        savedCharacters: Object.keys(snapshot?.state?.characters ?? {}).length,
+        legacySignature: Boolean(snapshot && snapshot.signatureVersion !== 2),
+    };
 }
 
 function snapshotForMessage(message) {
@@ -1452,11 +1482,11 @@ function harvestMessage(message) {
         const panelTime = infoPanelField(message.mes, 'Date', '날짜');
         if (panelTime) state.time = toBi(panelTime);
         const store = getMessageStore(message);
-        store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature };
+        store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature, signatureVersion: 2 };
         found = true;
     } else {
         const snapshot = snapshotForMessage(message);
-        found = Boolean(snapshot?.state && snapshot.messageSignature === signature);
+        found = snapshotMatchesMessage(message, snapshot);
     }
     return { changed, found, state };
 }
@@ -1478,7 +1508,7 @@ function effectiveState() {
     let lastSnapshot = null;
     for (let i = messages.length - 1; i >= 0; i--) {
         const snapshot = snapshotForMessage(messages[i]);
-        if (snapshot?.state && snapshot.messageSignature === messageStateSignature(messages[i])) {
+        if (snapshotMatchesMessage(messages[i], snapshot)) {
             lastSnapshot = snapshot;
             break;
         }
@@ -1489,6 +1519,20 @@ function effectiveState() {
     }
     if (lastSnapshot) return { state: lastSnapshot.state, source: 'tag' };
     return { state: null, source: 'none' };
+}
+
+// Keep the saved report inspectable after an unknown body transformation. It is
+// explicitly unverified and must not become current prompt state by this route.
+function stateForDisplay() {
+    const current = effectiveState();
+    const meta = getChatMeta(false);
+    if (meta?.nsfwSuspended || meta?.nsfwResumePending || ['manual', 'ai-refine'].includes(current.source)) return current;
+    const message = assistantMessages().at(-1);
+    const snapshot = snapshotForMessage(message);
+    if (snapshot?.state && !isPendingAssistant(message) && !snapshotMatchesMessage(message, snapshot)) {
+        return { state: snapshot.state, source: 'body-changed' };
+    }
+    return current;
 }
 
 function ignoredActSet() {
@@ -2499,6 +2543,7 @@ async function runRefine({ manual = false } = {}) {
             state,
             at: refinedAt,
             messageSignature: target.contentSignature,
+            signatureVersion: 2,
         };
         persistChat();
         meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
@@ -2705,7 +2750,7 @@ function handleIncomingMessage(index) {
     const { changed, found, state } = harvestMessage(message);
     if (diagnosticsEnabled()) {
         const saved = state ?? snapshotForMessage(message)?.state;
-        diagnosticRecord('collection_result', { message: entry.index, swipe: currentSwipeIndex(message), found, wrote: Boolean(state), stripped: changed, characters: Object.keys(saved?.characters ?? {}).length, missing: stateCompletenessIssues(saved) });
+        diagnosticRecord('collection_result', { message: entry.index, swipe: currentSwipeIndex(message), found, wrote: Boolean(state), stripped: changed, ...diagnosticCache(message), characters: Object.keys(saved?.characters ?? {}).length, missing: stateCompletenessIssues(saved) });
     }
     if (found) {
         // 새 스냅샷이 수동 보정보다 최신이므로 수동 보정은 자연히 밀려남
@@ -2721,6 +2766,7 @@ function handleIncomingMessage(index) {
     if (changed) {
         rerenderMessage(entry.index, message);
         persistChat();
+        if (diagnosticsEnabled()) diagnosticRecord('collection_settled', { message: entry.index, swipe: currentSwipeIndex(message), ...diagnosticCache(message) });
     }
     const targetProgress = slowBurnTargetProgress();
     if (targetProgress.active && targetProgress.completedTurns >= targetProgress.requiredTurns) {
@@ -2733,7 +2779,9 @@ function handleIncomingMessage(index) {
     const completenessState = state ?? snapshotForMessage(message)?.state ?? null;
     const completenessIssues = found ? stateCompletenessIssues(completenessState, settings) : [];
     if (!found || completenessIssues.length) {
-        const reason = found ? `상태 태그 불완전 (${completenessIssues.join(', ')})` : '상태 태그 누락';
+        const mismatch = !found && Boolean(snapshotForMessage(message)?.state);
+        if (mismatch) diagnosticRecord('cache_invalidated', { reason: 'body_signature_mismatch', message: entry.index, swipe: currentSwipeIndex(message), ...diagnosticCache(message) });
+        const reason = found ? `상태 태그 불완전 (${completenessIssues.join(', ')})` : mismatch ? '저장 후 본문 불일치' : '상태 태그 누락';
         console.debug(`${LOG_PREFIX} ${reason} — 보조 AI 보정 ${settings.autoRefine ? '예약' : '비활성'}`);
         scheduleAutoRefine();
     }
@@ -2797,7 +2845,7 @@ function populateProfiles() {
 
 function applyManualEdit(mutator) {
     const meta = getChatMeta();
-    const { state } = effectiveState();
+    const { state } = stateForDisplay();
     const base = state ? structuredClone(state) : { location: '', characters: {}, acts: [] };
     mutator(base);
     meta.manualState = { state: sanitizeState(base) ?? base, at: Date.now(), source: 'manual' };
@@ -2920,11 +2968,11 @@ function renderCardLinkPanel(settings) {
 }
 
 function renderStatePanel() {
-    const { state, source } = effectiveState();
+    const { state, source } = stateForDisplay();
     const settings = getSettings();
     renderSlowBurnPanel(settings);
     renderCardLinkPanel(settings);
-    const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', 'nsfw-resume': settings.autoRefine ? '최신 장면 수집 대기' : '최신 장면 수집 대기 · 자동 보정 꺼짐', none: '아직 기록 없음' }[source] ?? source;
+    const sourceLabel = { 'body-changed': '저장 후 본문 변경 · 이전 수집값 표시 (현재 상태 미확인)', tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', 'nsfw-resume': settings.autoRefine ? '최신 장면 수집 대기' : '최신 장면 수집 대기 · 자동 보정 꺼짐', none: '아직 기록 없음' }[source] ?? source;
     const failed = refineFailure?.metadata === getContext().chatMetadata
         && sameRefineTarget(refineFailure.target, latestAssistantTarget());
     element('tsf-state-source').textContent = refineRunning ? '보조 AI 분석 중…'
@@ -3800,9 +3848,18 @@ function registerEvents() {
         generationEvents = [];
         schedulePostGenerationHarvest();
     });
-    listen('CHARACTER_MESSAGE_RENDERED', (index) => schedulePostGenerationHarvest(index));
-    listen('MESSAGE_SWIPED', (index) => schedulePostGenerationHarvest(index));
-    listen('MESSAGE_EDITED', (index) => schedulePostGenerationHarvest(index));
+    listen('CHARACTER_MESSAGE_RENDERED', (index) => {
+        diagnosticRecord('message_rendered', { message: Number(index) });
+        schedulePostGenerationHarvest(index);
+    });
+    listen('MESSAGE_SWIPED', (index) => {
+        diagnosticRecord('message_swiped', { message: Number(index) });
+        schedulePostGenerationHarvest(index);
+    });
+    listen('MESSAGE_EDITED', (index) => {
+        diagnosticRecord('message_edited', { message: Number(index) });
+        schedulePostGenerationHarvest(index);
+    });
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
         diagnosticRecord('chat_changed');
