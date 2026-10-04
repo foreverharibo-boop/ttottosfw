@@ -235,3 +235,23 @@ test('clearing diagnostics during a response read cancels observation and discar
     r.api.clearDiagnostics(); await pending;
     assert.equal(cancelled, true); assert.equal(r.rows().length, 0);
 });
+
+test('diagnostics count object state and NSFW heat without exporting names or state text', async () => {
+    const r = runtime();
+    const tag = '<sfw_scene>' + JSON.stringify({ ...state, important_objects: { PRIVATE_OBJECT: 'PRIVATE_OBJECT_STATE' } }) + '</sfw_scene>';
+    await r.api.diagnosticInspectResponse(chatResponse('PRIVATE BODY' + '<scene_state>{"heat":6}</scene_state>' + tag), reportInfo, 1, 1, 0);
+    const data = r.rows().find(e => e.stage === 'server_response_observed').data;
+    assert.equal(data.characters, 1); assert.equal(data.objects, 1); assert.equal(data.nsfwHeat, 6);
+    r.context.chat.push({ mes: 'PRIVATE BODY' + tag }); r.api.handleIncomingMessage(0);
+    assert.equal(r.rows().find(e => e.stage === 'collection_result').data.savedObjects, 1);
+    for (const text of ['PRIVATE_OBJECT', 'PRIVATE_OBJECT_STATE', 'PRIVATE BODY']) assert.ok(!r.api.diagnosticReport().includes(text));
+});
+test('conditional return-report requests are recognized at the fetch boundary', async () => {
+    const r = runtime(); r.context.extensionSettings['ttotto-nsfw'] = { enabled: true };
+    r.env.ttottoNsfwSceneBridge = { sync: () => true };
+    r.api.syncDiagnosticFetch(); r.api.prepareSceneInjection({ generationType: 'normal' });
+    await r.env.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify({ messages: [{ content: r.prompts.ttotto_sfw_continuity }] }) });
+    const row = r.rows().find(e => e.stage === 'request_observed').data;
+    assert.equal(row.returnReport, true); assert.equal(row.reportInstruction, true);
+    assert.equal(row.sfwDirective, false);
+});

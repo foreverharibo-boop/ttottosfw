@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.36';
+const EXTENSION_VERSION = '0.2.37';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -458,6 +458,18 @@ function resetDiagnosticEvidence() {
     for (const reader of diagnosticReaders) { try { void reader.cancel().catch(() => {}); } catch {} }
     diagnosticReaders.clear(); diagnosticResponseSlots.clear(); diagnosticBodies.clear(); diagnosticResponses = [];
 }
+function diagnosticNsfwReport(text) {
+    const blocks = [...String(text ?? '').matchAll(/<scene_state\b[^>]*>([\s\S]*?)<\/scene_state>/gi)];
+    let heat = null;
+    try {
+        const raw = blocks.at(-1)?.[1];
+        if (raw) {
+            const parsed = parseStateJson(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+            if (typeof parsed.heat === 'number' && Number.isFinite(parsed.heat)) heat = parsed.heat;
+        }
+    } catch { /* No guessing on malformed reports. */ }
+    return { nsfwHeatPresent: heat !== null, ...(heat !== null ? { nsfwHeat: heat } : {}) };
+}
 function diagnosticTextShape(text) {
     const state = parseStateFromText(text);
     return {
@@ -465,6 +477,7 @@ function diagnosticTextShape(text) {
         openTag: /<sfw_scene\b/i.test(text), closeTag: /<\/sfw_scene\s*>/i.test(text),
         escapedTag: /&lt;sfw_scene\b/i.test(text), nsfwTag: /<scene_state\b/i.test(text),
         parsed: Boolean(state), characters: Object.keys(state?.characters ?? {}).length,
+        objects: Object.keys(state?.importantObjects ?? {}).length, ...diagnosticNsfwReport(text),
         missing: state ? stateCompletenessIssues(state) : ['state'],
     };
 }
@@ -640,7 +653,7 @@ function diagnosticState() {
     const nsfw = getContext().chatMetadata?.[NSFW_CHAT_STATE_KEY] ?? {};
     return { enabled: Boolean(settings.enabled), chatEnabled: Boolean(meta.enabled), autoRefine: Boolean(settings.autoRefine),
         suspended: Boolean(meta.nsfwSuspended), resumePending: Boolean(meta.nsfwResumePending),
-        nsfwAutoArmed: Boolean(nsfw.autoArmed), nsfwForceArmed: Boolean(nsfw.forceArmed), nsfwBridge: Boolean(nsfw.bridgePending),
+        nsfwAutoArmed: Boolean(nsfw.autoArmed), nsfwArmedByHeat: nsfw.armSource === 'heat', nsfwArmedLocally: nsfw.armSource === 'local', nsfwForceArmed: Boolean(nsfw.forceArmed), nsfwBridge: Boolean(nsfw.bridgePending),
         refineRunning, pendingGenerations: generationEvents.length };
 }
 function diagnosticReport() {
@@ -689,6 +702,7 @@ function diagnosticResponse(message, index) {
         escapedTag: /&lt;sfw_scene\b/i.test(text), nsfwTag: /<scene_state\b/i.test(text),
         parsed: Boolean(state), ...diagnosticCache(message),
         characters: Object.keys(state?.characters ?? {}).length,
+        objects: Object.keys(state?.importantObjects ?? {}).length, ...diagnosticNsfwReport(text),
         missing: state ? stateCompletenessIssues(state) : ['state'], ...diagnosticState(),
     });
 }
@@ -712,7 +726,8 @@ function diagnosticInspectPayload(body, requestId, chat, epoch) {
     const info = {
         requestId, readable: true, stream: Boolean(payload.stream),
         sfwDirective: content.includes('[Scene Continuity Directive]'),
-        reportInstruction: content.includes('STATE REPORT: End your response with exactly one state block') && content.includes('<sfw_scene>'),
+        reportInstruction: (content.includes('STATE REPORT: End your response with exactly one state block') || content.includes('[SFW Return Report]')) && content.includes('<sfw_scene>'),
+        returnReport: content.includes('[SFW Return Report]'),
         nsfwMonitor: content.includes('[Scene Monitor]'),
         messages: Array.isArray(payload.messages) ? payload.messages.length : 0,
     };
@@ -1624,6 +1639,7 @@ function diagnosticCache(message) {
         bodyChars: stateRecordBody(message?.mes).length,
         savedBodyChars: Number(String(snapshot?.messageSignature ?? '').split(':')[1] ?? -1),
         savedCharacters: Object.keys(snapshot?.state?.characters ?? {}).length,
+        savedObjects: Object.keys(snapshot?.state?.importantObjects ?? {}).length,
         legacySignature: Boolean(snapshot && snapshot.signatureVersion !== 2),
     };
 }
@@ -2275,6 +2291,23 @@ function stateReportLines(settings, nextGuidance = '') {
     return lines;
 }
 
+// While NSFW owns the narrative, request only a conditional return report.
+// No SFW pacing, bans, state injection, or scene-ending instructions are added.
+function buildHandoffReport() {
+    const settings = getSettings();
+    const schema = stateReportLines(settings).find(line => line.startsWith('<sfw_scene>'));
+    return [
+        '[SFW Return Report]',
+        'This is conditional bookkeeping only. Do not end, slow, redirect, or change the story to satisfy it.',
+        'ONLY IF this response ends with the sexual scene over and everyday/non-sexual activity resumed, append one complete <sfw_scene> report using the schema below. If sexual activity is still ongoing, omit this SFW report.',
+        'Keep the separately requested <scene_state> report. The one-report limit applies once per tag type; on an everyday return include both reports, with <sfw_scene> last.',
+        schema,
+        'Fill the report from the situation at the END of THIS response. Include every present character, their appearance/clothing, posture, held items and condition, plus scene-relevant important objects and their current locations/conditions. Do not copy old scene states; do not invent absent people or objects.',
+        'Copy the exact Info_panel date/time if present. Each string is concise English || Korean. Use valid single-line JSON. Never replace real values with no_change or unchanged.',
+        'intensity means narrative tension (0-10), NOT sexual heat; report the actual value. If stage is included, report the current progression of the returned scene type (1-6). acts describes new substantive beats; next describes fresh future possibilities. Empty objects are allowed only when no relevant objects are established.',
+    ].join('\n');
+}
+
 function buildInjection() {
     const settings = getSettings();
     const meta = getChatMeta(false);
@@ -2446,7 +2479,13 @@ function prepareSceneInjection({ consumeBridge = true, generationType } = {}) {
         const meta = getChatMeta();
         const nsfwSuspended = syncNsfwSuspension();
         if (localNsfwBlocksSfw() || nsfwSuspended) {
-
+            if (runtimeActive && settings.enabled && meta?.enabled
+                && nsfwExtensionInstalled() && nsfwExtensionOwnsScene()) {
+                const prompt = buildHandoffReport();
+                getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
+                diagnosticRecord('injection_registered', { reason: 'return_report_only', chars: prompt.length, reportInstruction: true, ...diagnosticState() });
+                return;
+            }
             diagnosticRecord('injection_skipped', { reason: 'nsfw_or_rewrite', ...diagnosticState() });
             console.debug(`${LOG_PREFIX} NSFW 장면 자동 인계 — SFW 주입 생략`);
             return;

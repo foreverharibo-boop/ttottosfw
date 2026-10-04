@@ -266,3 +266,46 @@ test('legacy saved reports remain valid when their existing signature matches', 
     saved.messageSignature = r.env.sfw.legacyMessageStateSignature(r.context.chat[0]);
     assert.equal(r.env.sfw.effectiveState().source, 'tag');
 });
+
+test('NSFW-owned generation requests a conditional full return report without SFW narrative controls', () => {
+    const r = setup({ owner: true, suspended: true, chat: [msg('Previous scene.')] });
+    r.env.sfw.prepareSceneInjection({ generationType: 'normal' });
+    const prompt = r.prompts.ttotto_sfw_continuity;
+    assert.ok(prompt.includes('[SFW Return Report]'));
+    assert.ok(prompt.includes('ONLY IF'));
+    assert.ok(prompt.includes('important_objects'));
+    assert.ok(prompt.includes('"holding"'));
+    assert.ok(!prompt.includes('[Scene Continuity Directive]'));
+    assert.ok(!prompt.includes('PACING:'));
+    assert.equal(r.env.sfw.isFullyArmed(), false);
+    assert.equal(r.requests, 0);
+    r.context.chat.push(msg('Everyday return.' + panel + stateTag({ ...sfwReport, important_objects: { Bottle: 'On table' } })));
+    r.env.ttottoNsfwSceneBridge.sync = () => false;
+    r.env.sfw.handleIncomingMessage(1);
+    const current = r.env.sfw.effectiveState();
+    assert.equal(current.source, 'tag');
+    assert.equal(Object.keys(current.state.characters).length, 1);
+    assert.equal(current.state.importantObjects.Bottle.en, 'On table');
+    assert.equal(r.meta.nsfwResumePending, false);
+    assert.equal(r.requests, 0);
+    assert.equal(r.timers.size, 0);
+    r.unchanged();
+});
+test('disabled SFW never adds a return report while NSFW owns the scene', () => {
+    for (const globalOff of [true, false]) {
+        const r = setup({ owner: true, suspended: true, chat: [msg('Previous scene.')] });
+        if (globalOff) r.env.sfw.getSettings().enabled = false;
+        else r.meta.enabled = false;
+        r.env.sfw.prepareSceneInjection({ generationType: 'normal' });
+        assert.equal(r.prompts.ttotto_sfw_continuity, '');
+    }
+});
+test('continued NSFW ownership still prevents a conditional SFW report from becoming current state', () => {
+    const r = setup({ owner: true, suspended: true, chat: [msg('Previous scene.')] });
+    r.env.sfw.prepareSceneInjection({ generationType: 'normal' });
+    r.context.chat.push(msg('Still the owned scene.' + stateTag(sfwReport)));
+    r.env.sfw.handleIncomingMessage(1);
+    assert.equal(r.context.chat[1].extra?.ttottoSfw, undefined);
+    assert.equal(r.env.sfw.isFullyArmed(), false);
+    assert.equal(r.requests, 0);
+});
