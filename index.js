@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.35';
+const EXTENSION_VERSION = '0.2.36';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -2975,14 +2975,18 @@ function element(id) {
     return document.getElementById(id);
 }
 
+let activeUiTab = 'state';
 function setTab(tab) {
+    activeUiTab = tab;
+    const box = element('tsf-popup-box');
+    if (box) box.style.setProperty('max-width', tab === 'diagnostics' ? '860px' : '460px', 'important');
     document.querySelectorAll('#ttotto-sfw-settings [data-tsf-tab]').forEach((button) => {
         const active = button.dataset.tsfTab === tab;
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-selected', String(active));
     });
     // hidden 속성만으로는 팝업/테마 CSS와 충돌할 수 있어 인라인 스타일로도 강제한다
-    const panels = { state: element('tsf-panel-state'), settings: element('tsf-panel-settings') };
+    const panels = { state: element('tsf-panel-state'), diagnostics: element('tsf-panel-diagnostics'), settings: element('tsf-panel-settings') };
     for (const [name, panel] of Object.entries(panels)) {
         if (!panel) continue;
         const active = name === tab;
@@ -3908,6 +3912,7 @@ function openPopup() {
     const body = document.getElementById('tsf-popup-body');
     if (body) body.style.cssText = 'box-sizing:border-box !important; width:100% !important; min-width:0 !important; max-width:100% !important; overflow-y:auto !important; overflow-x:hidden !important; overscroll-behavior-x:none !important; touch-action:pan-y !important; padding:8px 14px 14px !important; -webkit-overflow-scrolling:touch;';
     popupOpen = true;
+    setTab(activeUiTab);
     updateUi();
 }
 

@@ -545,3 +545,67 @@
 .ttotto-sfw-settings .tsf-card-link-row {
     margin: 0;
 }
+
+/* Diagnostics is its own tab; do not inherit full-width field input rules. */
+#ttotto-sfw-settings .tsf-tabs {
+    flex-direction: row;
+    flex-wrap: nowrap;
+}
+#ttotto-sfw-settings .tsf-diagnostic-toolbar {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+#ttotto-sfw-settings .tsf-diagnostic-switch {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin: 0;
+}
+#ttotto-sfw-settings #tsf-diagnostics-enabled {
+    width: 1.1em;
+    min-width: 1.1em;
+    flex: 0 0 1.1em;
+    margin: 0;
+}
+#ttotto-sfw-settings .tsf-diagnostic-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+}
+#ttotto-sfw-settings .tsf-diagnostic-actions .menu_button {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    box-sizing: border-box;
+    white-space: nowrap;
+}
+#ttotto-sfw-settings #tsf-diagnostic-log {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    height: clamp(220px, 45vh, 480px);
+    margin: 0;
+    resize: vertical;
+    overflow: auto;
+    white-space: pre;
+    overflow-wrap: normal;
+    word-break: normal;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    touch-action: pan-x pan-y;
+}
+#ttotto-sfw-settings .tsf-diagnostic-help {
+    display: block;
+    font-size: 0.85em;
+}
+#ttotto-sfw-settings #tsf-panel-diagnostics > small {
+    opacity: 0.75;
+}

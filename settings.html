@@ -20,6 +20,7 @@
     <div class="inline-drawer-content">
       <div class="tsf-tabs" role="tablist" aria-label="또또SFW 메뉴">
         <button id="tsf-tab-state" class="menu_button tsf-tab is-active" type="button" role="tab" aria-selected="true" data-tsf-tab="state">장면 상태</button>
+        <button id="tsf-tab-diagnostics" class="menu_button tsf-tab" type="button" role="tab" aria-selected="false" aria-controls="tsf-panel-diagnostics" data-tsf-tab="diagnostics">진단 기록</button>
         <button id="tsf-tab-settings" class="menu_button tsf-tab" type="button" role="tab" aria-selected="false" data-tsf-tab="settings">설정</button>
       </div>
 
@@ -200,6 +201,29 @@
             <i class="fa-solid fa-broom" aria-hidden="true"></i> 기록 비우기
           </button>
         </div>
+      </section>
+
+      <section id="tsf-panel-diagnostics" class="tsf-panel" role="tabpanel" aria-labelledby="tsf-tab-diagnostics" hidden>
+        <div class="tsf-diagnostic-toolbar">
+          <strong>수집 진단 기록</strong>
+          <label class="tsf-diagnostic-switch" for="tsf-diagnostics-enabled">
+            <input id="tsf-diagnostics-enabled" type="checkbox">
+            <span>기록 켜기</span>
+          </label>
+        </div>
+        <small id="tsf-diagnostic-status">기록 꺼짐</small>
+        <div class="tsf-diagnostic-actions">
+          <button id="tsf-diagnostic-copy" class="menu_button" type="button">복사</button>
+          <button id="tsf-diagnostic-download" class="menu_button" type="button">다운로드</button>
+          <button id="tsf-diagnostic-clear" class="menu_button" type="button">비우기</button>
+        </div>
+        <textarea id="tsf-diagnostic-log" class="text_pole" rows="16" wrap="off" readonly aria-label="수집 진단 기록"></textarea>
+        <small>답변과 후처리가 끝난 뒤 다운로드해 주세요. 새로고침 전에 저장해야 해요.</small>
+        <details class="tsf-diagnostic-help">
+          <summary>어떤 정보가 기록되나요?</summary>
+          <p>서버 응답의 태그 유무 → 수집 시점 → 저장 결과 → 본문 변경을 함께 기록해요. 최근 400건을 보관하며 추가 AI 호출은 없어요.</p>
+          <p>내려받는 로그에는 API 키·대화 본문·인물 이름이 포함되지 않아요. 본문이 달라 응답을 연결할 수 없거나 응답을 읽지 못하면 미확인으로 표시해요.</p>
+        </details>
       </section>
 
       <section id="tsf-panel-settings" class="tsf-panel" role="tabpanel" aria-labelledby="tsf-tab-settings" hidden>
@@ -396,22 +420,7 @@
           </select>
           <small>위에서 Vertex 연결 프로필을 선택했을 때만 적용돼요. 익스프레스 키를 쓰는데 서비스 계정 JSON 오류가 나면 Express를 선택하세요. 메인 연결과 저장된 프리셋은 바꾸지 않아요.</small>
         </label>
-        <details class="tsf-field">
-          <summary><strong>수집 진단 기록</strong></summary>
-          <label class="tsf-setting-row" for="tsf-diagnostics-enabled">
-            <span><strong>진단 기록 켜기</strong><small>수집이 멈출 때 켠 뒤 새 답변 한 번으로 재현해 주세요. 추가 AI 호출은 없어요.</small></span>
-            <input id="tsf-diagnostics-enabled" type="checkbox">
-          </label>
-          <small>주입 등록 → 요청 내 지시 확인 → 수집 시점의 태그 상태 → 저장·건너뜀 → 보정 여부를 기록해요. 요청 관찰은 서버·모델 수신을 보장하지 않으며, 태그 없음은 SFW가 읽은 시점의 결과예요.</small>
-          <small>서버 응답의 태그 유무, 저장 결과, 본문 변경을 함께 기록해요. 내려받는 로그에 API 키·대화 본문·인물 이름은 담지 않아요. 최근 400건만 메모리에 유지하고 새로고침하면 지워져요. 문제 재현 후 먼저 복사하거나 내려받아 주세요.</small>
-          <small id="tsf-diagnostic-status">기록 꺼짐</small>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">
-            <button id="tsf-diagnostic-copy" class="menu_button" type="button">진단 기록 복사</button>
-            <button id="tsf-diagnostic-download" class="menu_button" type="button">진단 기록 다운로드</button>
-            <button id="tsf-diagnostic-clear" class="menu_button" type="button">기록 비우기</button>
-          </div>
-          <textarea id="tsf-diagnostic-log" class="text_pole" rows="8" readonly aria-label="수집 진단 기록" style="width:100%;font-family:monospace"></textarea>
-        </details>
+
       </section>
     </div>
   </div>
