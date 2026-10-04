@@ -1,15 +1,25 @@
 // BEGIN LOCAL SCENE DETECTOR
 const scoreScene = (() => {
-// 두 확장에서 동일하게 사용하는 로컬 감지기. API나 프롬프트를 호출하지 않는다.
+// NSFW 로컬 감지기. API나 프롬프트를 호출하지 않는다.
 // 신체 단어 하나가 아니라 가까운 행동 표현과 함께 있을 때 강한 신호로 센다.
 const EN_BODY = String.raw`\b(?:breasts?|nipples?|clit(?:oris)?|pussy|cock|dick|penis|vulva|vagina|genitals?|outer\s+lips|bundle\s+of\s+nerves)\b`;
 const EN_ORAL = String.raw`\b(?:lick(?:s|ed|ing)?|suck(?:s|ed|ing)?|lap(?:s|ped|ping)?|suction)\b`;
 const EN_ORAL_MOTION = /\b(?:swirl(?:s|ed|ing)?|press(?:es|ed|ing)?|drag(?:s|ged|ging)?|circl(?:e|es|ed|ing)|flick(?:s|ed|ing)?|lick(?:s|ed|ing)?|suck(?:s|ed|ing)?|lap(?:s|ped|ping)?)\b/i;
-const EN_HAND = String.raw`\b(?:finger(?:s|ed|ing)?|digits?|hand)\b`;
+const EN_HAND = String.raw`\b(?:finger(?:s|ed|ing)?|digits?|hands?)\b`;
 const EN_INTIMATE = String.raw`\b(?:wetness|pussy|vagina|canal|clit(?:oris)?|nipples?|genitals?)\b`;
 const EN_MOTION = /\b(?:sink(?:s|ing)?|sank|buried|insert(?:s|ed|ing)?|pump(?:s|ed|ing)?|stretch(?:es|ed|ing)?|rub(?:s|bed|bing)?|strok(?:e|es|ed|ing)|penetrat(?:e|es|ed|ing)|fuck(?:s|ed|ing)?)\b/i;
-const KO_BODY = String.raw`(?:가슴|유두|젖꼭지|성기|클리토리스|음핵|음순|보지|자지|애액|젖은\s*(?:구멍|속살))`;
-const KO_TOUCH = String.raw`(?:핥|빨|애무|주무|움켜|문지|쑤셔|쑤시|쑤셔대|비벼|비비|삽입|밀어\s*넣|박아\s*넣|잠겨|파묻|마디.{0,20}잠)`;
+// 한국어에는 영문식 \b 경계가 통하지 않는다. 명사와 조사 경계를 확인하고
+// '보지 말고/자지 않고' 같은 동사, '자지러지다/성기게' 같은 다른 단어를 제외한다.
+function koreanNoun(words) {
+    return String.raw`(?<![가-힣A-Za-z0-9_])(?:${words})(?=$|[^가-힣A-Za-z0-9_]|(?:을|를|이|가|은|는|에|엔|에서|에게|의|도|만|로|으로|와|과|랑|부터|까지|처럼|보다|조차|마저|마다){1,3}(?=$|[^가-힣A-Za-z0-9_]))`;
+}
+const KO_HOMOGRAPHS = String.raw`(?:보지|자지)(?!(?:는|도|만)?\s*(?:말|않|못|마(?:라|요)?(?:$|[\s.!?])))`;
+const KO_BODY = koreanNoun(String.raw`가슴|유두|젖꼭지|성기|클리토리스|음핵|음순|${KO_HOMOGRAPHS}|애액|젖은\s*(?:구멍|속살)`);
+// '빨리/빨간/빨래'를 빨다의 활용형으로 세지 않는다.
+const KO_TOUCH = String.raw`(?:핥|빨(?=[아았고며면던듯다지]|$|[^가-힣])|빤(?=[다지듯]|$|[^가-힣])|빠는|애무|주무(?=[르른를름])|움켜|문지(?=[르른를름])|문질|쑤셔|쑤시|쑤셔대|비벼|비비|비볐|삽입|밀어\s*넣|박아\s*넣|잠겨|파묻|마디.{0,20}잠)`;
+const KO_AMBIGUOUS_ACTION = /삽입|박아\s*넣|쑤셔|쑤시|밀어\s*넣|잠겨|파묻|사정/;
+const KO_INTIMATE_CONTEXT = new RegExp(koreanNoun(String.raw`성기|클리토리스|음핵|음순|${KO_HOMOGRAPHS}|애액|질|항문|정액|발기|젖은\s*(?:구멍|속살)`)
+    + String.raw`|성적\s*(?:쾌감|자극|접촉|흥분)|애무|자위|성교|오르가즘`, 'i');
 const NEAR = String.raw`[^.!?。！？\n]{0,180}?`;
 function nearby(left, right, span = NEAR) {
     return new RegExp(`(?:${left})${span}(?:${right})|(?:${right})${span}(?:${left})`, 'gi');
@@ -18,14 +28,45 @@ function nearby(left, right, span = NEAR) {
 // 의복 마찰은 운동/세탁에도 등장한다. 같은 문단의 구체적인 성적 신체 반응이 있어야 인정한다.
 const EN_GENITAL_RESPONSE = nearby(String.raw`\b(?:cock|dick|penis|erection)\b`,
     String.raw`\b(?:hard|stiff|rigid|erect|throb(?:s|bed|bing)?|aching|aroused)\b`);
-const KO_GENITAL_RESPONSE = nearby(String.raw`(?:성기|자지|발기)`,
+const KO_GENITAL_RESPONSE = nearby(koreanNoun(String.raw`성기|자지(?!(?:는|도|만)?\s*(?:말|않|못))|발기`),
     String.raw`(?:발기|단단|팽팽|굳|빳빳|뻣뻣|욱신|발딱|꼿꼿)`, String.raw`[^.!?。！？\n]{0,80}?`);
 
+// 노출/젖은 몸/탈의는 위생 장면에서도 흔하다. 신체+동사의 일치만으로
+// 성적 행위라고 단정하지 않고, 일치한 행동의 문장 맥락을 확인한다.
+const HYGIENE = /\b(?:shower(?:s|ed|ing)?|bath(?:s|ing)?|bathe[ds]?|wash(?:es|ed|ing)?|rins(?:e|es|ed|ing)|soap(?:y)?|shampoo(?:s|ed|ing)?|scrub(?:s|bed|bing)?|lather(?:s|ed|ing)?|towell?(?:ed|ing)?|clean(?:s|ed|ing)?|dry(?:ing)?\s+(?:off|herself|himself))\b|샤워|목욕|씻|헹[구궈]|비누|샴푸|세정|물기|때를\s*(?:밀|벗)|수건.{0,20}(?:닦|말리)/i;
+const NONSEXUAL = /\b(?:pain|injur(?:y|ies|ed)|wound|bruise[ds]?|sore|fever|shiver(?:s|ed|ing)?|medical|examin(?:e|es|ed|ing)|bandage|breastfeed(?:s|ing)?|nurs(?:e|es|ed|ing)\s+(?:a|the|her)\s+baby)\b|통증|아파|아픈|부상|상처|멍든|진찰|검사|치료|수유/i;
+const CLOTHES_CHANGE = /\bchang(?:e|es|ed|ing)\s+(?:(?:her|his|their)\s+)?(?:clothes|clothing|shirt|pants|underwear|outfit)\b|\bchang(?:e|es|ed|ing)\s+into\b|갈아입/i;
+const SEXUAL_ACTION = /\b(?:lick(?:s|ed|ing)?|suck(?:s|ed|ing)?|fondl(?:e|es|ed|ing)|masturbat(?:e|es|ed|ing)|penetrat(?:e|es|ed|ing)|fuck(?:s|ed|ing)?|ejaculat(?:e|es|ed|ing)|orgasm(?:s|ed|ing)?|thrust(?:s|ed|ing)?)\b|핥|빨아|빨았|빨며|빨고|애무|자위|성교|사정(?:하|했|해|중)|오르가즘/i;
+const SEXUAL_INTENT = /\b(?:sexually|sexual\s+(?:pleasure|stimulation|contact)|arous(?:e|ed|al)|lust(?:ful)?|masturbat(?:e|es|ed|ing)|fondl(?:e|es|ed|ing))\b|성적\s*(?:쾌감|자극|접촉|흥분)|애무|자위/i;
+const NOT_AN_ACT = /\b(?:(?:did|does|do|is|was|were|will|would|could|had|has|have)\s+not|didn['’]t|doesn['’]t|don['’]t|wasn['’]t|isn['’]t|wouldn['’]t|couldn['’]t|never|without)\s+(?!(?:stop|ceas|pause|hesitat))|(?:하지|하지는|하지도|하지\s*않|핥지|빨지|문지르지|넣지|느끼지|삽입하지|사정하지).{0,12}(?:않|못)|(?:할|하려는)\s*(?:생각|계획)|\b(?:discuss(?:es|ed|ing)?|explain(?:s|ed|ing)?|definition|hypothetical)\b/i;
+const ROMANTIC_KISS = /키스가\s*깊어|혀가\s*얽|\bkiss(?:es|ed|ing)?\s+(?:(?:him|her|them|me|you|each\s+other)\s+)?(?:deeply|hungrily)\b|\btongues?\s+(?:tangled|met)\b/gi;
+
+function sentenceAt(source, start, end) {
+    const before = source.slice(Math.max(0, start - 180), start).match(/[^.!?。！？\n;]*$/)[0];
+    const after = source.slice(end, end + 180).match(/^[^.!?。！？\n;]*/)[0];
+    return before + source.slice(start, end) + after;
+}
+
+function paragraphAt(source, start, end) {
+    return source.slice(Math.max(0, start - 600), start).split(/\n\s*\n/).at(-1)
+        + source.slice(start, end) + source.slice(end, end + 600).split(/\n\s*\n/)[0];
+}
+
+function hasCurrentKiss(text) {
+    ROMANTIC_KISS.lastIndex = 0;
+    const matches = [...text.matchAll(ROMANTIC_KISS)];
+    return matches.some(match => {
+        const sentence = sentenceAt(text, match.index, match.index + match[0].length);
+        return !NOT_AN_ACT.test(sentence) && !NONSEXUAL.test(sentence);
+    });
+}
+
+
 const RULES = [
-    { label: '현재 명시적 행위', w: 4, re: /삽입(?:하|했|해|되|된|되는|중)|박아\s*넣|쑤셔\s*넣|사정(?:하|했|해|시키|하며|하는|하려)|오르가즘(?:에|을)\s*(?:도달|느끼)|질\s*(?:안|속)에\s*(?:넣|박)|\bpenetrat(?:e|es|ed|ing)\b|\bthrust(?:ed|ing|s)?\s+(?:inside|into|against)\b|\borgasm(?:s|ed|ing)\b|\bejaculat(?:e|es|ed|ing)\b|\bcame\s+(?:inside|over|on)\b|\bcoming\s+(?:inside|in\s+her|in\s+him)\b/gi },
+    { label: '현재 명시적 행위', w: 4, re: /삽입(?:하|했|해|되|된|되는|중)|박아\s*넣|쑤셔\s*넣|사정(?:하|했|해|시키|하며|하는|하려)|오르가즘(?:에|을)\s*(?:도달|느끼)|질\s*(?:안|속)에\s*(?:넣|박)|\bmasturbat(?:e|es|ed|ing)\b|자위(?:를)?\s*(?:하|했|해|중)|\bpenetrat(?:e|es|ed|ing)\b|\bthrust(?:ed|ing|s)?\s+(?:inside|into|against)\b|\borgasm(?:s|ed|ing)\b|\bejaculat(?:e|es|ed|ing)\b|\bcame\s+(?:inside|over|on)\b|\bcoming\s+(?:inside|in\s+her|in\s+him)\b/gi },
     { label: '영어 구강 접촉', w: 4, re: nearby(EN_BODY, EN_ORAL) },
     { label: '영어 입·혀 접촉', w: 4, re: nearby(EN_BODY, String.raw`\b(?:tongue|mouth)\b`), require: EN_ORAL_MOTION },
-    { label: '영어 직접 행동', w: 4, re: nearby(EN_BODY, String.raw`\b(?:fuck(?:s|ed|ing)?|thrust(?:s|ed|ing)?|insert(?:s|ed|ing)?)\b`) },
+    { label: '영어 직접 행동', w: 4, re: nearby(EN_BODY, String.raw`\b(?:fuck(?:s|ed|ing)?|thrust(?:s|ed|ing)?|insert(?:s|ed|ing)?|fondl(?:e|es|ed|ing))\b`) },
     { label: '영어 손 접촉', w: 4, re: nearby(EN_HAND, EN_INTIMATE), require: EN_MOTION },
     { label: '한국어 직접 접촉', w: 4, re: nearby(KO_BODY, KO_TOUCH, String.raw`[^.!?。！？\n]{0,80}?`) },
     { label: '영어 의복·골반 마찰과 성적 반응', w: 4,
@@ -38,20 +79,38 @@ const RULES = [
         requireParagraph: KO_GENITAL_RESPONSE },
     { label: '신음 표기', w: 3, re: /하앙|흐응|아앙|흐읏|하아앙|응아|앗\s*…?\s*안|\bmoan(?:ed|ing|s)?\b|\bwhimper(?:ed|ing)?\b/gi },
     { label: '현재 탈의·밀착', w: 2, re: /(?:옷|속옷|팬티|브래지어|바지|치마)(?:을|를)?\s*(?:벗기|벗겨|내리)|\bgrind(?:s|ing)?\s+(?:against|on|into)\b|\bground\s+(?:against|on|into)\b|\bstraddl(?:e|es|ed|ing)\s+(?:her|him|them)\b/gi },
-    { label: '성적 접촉 분위기', w: 1, re: /키스가\s*깊어|혀가\s*얽|목덜미에\s*입|귓불을\s*(?:물|빨|핥)|\bkiss(?:es|ed|ing)?\s+(?:deeply|hungrily)\b|\btongues?\s+(?:tangled|met)\b|\bhands?\s+(?:slid|moved)\s+(?:under|between)\b/gi },
+    { label: '성적 접촉 분위기', w: 1, re: /키스가\s*깊어|혀가\s*얽|목덜미에\s*입|귓불을\s*(?:물|빨|핥)|\bkiss(?:es|ed|ing)?\s+(?:(?:him|her|them|me|you|each\s+other)\s+)?(?:deeply|hungrily)\b|\btongues?\s+(?:tangled|met)\b|\bhands?\s+(?:slid|moved)\s+(?:under|between)\b/gi },
 ];
 
 function scoreScene(text, customKeywords = '') {
     const source = String(text ?? '')
         .replace(/<(scene_state|sfw_scene)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-        .replace(/<(?:scene_state|sfw_scene)\b[^>]*>[\s\S]*$/gi, '');
+        .replace(/<(?:scene_state|sfw_scene)\b[^>]*>[\s\S]*$/gi, '')
+        // 별개 행동을 한 쌍으로 연결하지 않는다. 샤워 뒤의 실제 성적 행동은 따로 검사한다.
+        .replace(/\b(?:while|whereas|meanwhile|but\s+then)\b|하지만|그러나/gi, '\n');
     const hits = [];
-    let score = 0;
     for (const { label, re, w, require, requireParagraph } of RULES) {
         re.lastIndex = 0;
         let match;
         let count = 0;
         while (count < 3 && (match = re.exec(source)) !== null) {
+            const sentence = sentenceAt(source, match.index, re.lastIndex);
+            if (NOT_AN_ACT.test(sentence)) continue;
+            // '물건을 봉투에 쑤셔 넣다/카드를 삽입하다/못을 박아 넣다/사정하다'는
+            // 동사만으로 성적 행위가 아니다. 그 행동의 문장 안에 별도 근거가 필요하다.
+            if ((label === '현재 명시적 행위' || label === '한국어 직접 접촉')
+                && KO_AMBIGUOUS_ACTION.test(match[0]) && !KO_INTIMATE_CONTEXT.test(sentence)) continue;
+            if (NONSEXUAL.test(sentence) && !SEXUAL_ACTION.test(match[0])) continue;
+            const paragraph = paragraphAt(source, match.index, re.lastIndex);
+            const romanticContact = label === '성적 접촉 분위기' && hasCurrentKiss(match[0]);
+            const romanticVoice = label === '신음 표기' && hasCurrentKiss(paragraph);
+            if ((HYGIENE.test(sentence) || CLOTHES_CHANGE.test(sentence))
+                && !SEXUAL_ACTION.test(match[0]) && !romanticContact && !romanticVoice) continue;
+            // '샤워 중이다. 몸을 문질렀다.'처럼 위생 목적이 직전 문장에만 있어도 구분한다.
+            // 실제 키스와 그에 이어진 신음은 위생 장면 안에서도 별도 신호로 인정한다.
+            if ((HYGIENE.test(paragraph) || CLOTHES_CHANGE.test(paragraph))
+                && !SEXUAL_ACTION.test(match[0]) && !SEXUAL_INTENT.test(sentence)
+                && !romanticContact && !romanticVoice) continue;
             // 동사가 신체/도구보다 먼저 나오는 어순도 같은 문장 안에서 확인한다.
             if (require) {
                 const before = source.slice(Math.max(0, match.index - 180), match.index).match(/[^.!?。！？\n]*$/)[0];
@@ -59,26 +118,26 @@ function scoreScene(text, customKeywords = '') {
                 if (!require.test(before + match[0] + after)) continue;
             }
             if (requireParagraph) {
-                const before = source.slice(Math.max(0, match.index - 600), match.index)
-                    .split(/\n\s*\n/).at(-1);
-                const after = source.slice(re.lastIndex, re.lastIndex + 600)
-                    .split(/\n\s*\n/)[0];
                 requireParagraph.lastIndex = 0;
-                if (!requireParagraph.test(before + match[0] + after)) continue;
+                if (!requireParagraph.test(paragraphAt(source, match.index, re.lastIndex))) continue;
             }
             hits.push({ label, text: match[0], w });
-            score += w;
             count++;
         }
     }
     const lower = source.toLocaleLowerCase();
     for (const keyword of String(customKeywords).split(',').map((word) => word.trim()).filter(Boolean)) {
-        if (lower.includes(keyword.toLocaleLowerCase())) {
-            score += 3;
-            hits.push({ label: '커스텀', text: keyword, w: 3 });
+        const needle = keyword.toLocaleLowerCase();
+        for (let index = lower.indexOf(needle); index >= 0; index = lower.indexOf(needle, index + needle.length)) {
+            const sentence = sentenceAt(source, index, index + keyword.length);
+            if (!HYGIENE.test(sentence) && !CLOTHES_CHANGE.test(sentence) && !NONSEXUAL.test(sentence) && !NOT_AN_ACT.test(sentence)) {
+                hits.push({ label: '커스텀', text: keyword, w: 3 });
+                break;
+            }
         }
     }
-    return { score, hits };
+    const score = hits.reduce((sum, hit) => sum + hit.w, 0);
+    return { score, hits, routineOnly: (HYGIENE.test(source) || CLOTHES_CHANGE.test(source)) && score === 0 };
 }
 
 return scoreScene;
@@ -101,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.30';
+const EXTENSION_VERSION = '0.2.31';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -347,6 +406,7 @@ let uiReady = false;
 let initializationPromise = null;
 let eventsRegistered = false;
 let refineRunning = false;
+let refineFailure = null;
 let refineAbortController = null;
 let refineTimer = null;
 let activeRefineTarget = null;
@@ -718,7 +778,7 @@ function isSupervising() {
 // 개입 중: 연속성·반복금지·진행 지시까지 전부 주입하는 상태
 function isFullyArmed() {
     return Boolean(isSupervising() && !getChatMeta(false)?.nsfwSuspended
-        && localNsfwWindowScore() < localNsfwThreshold());
+        && !localNsfwBlocksSfw());
 }
 
 // ───────────────────────── NSFW 장면 자동 인계 ─────────────────────────
@@ -749,6 +809,12 @@ function stripDetectorTags(text) {
     return stripStateTag(String(text ?? ''))
         .replace(NSFW_STATE_TAG_REGEX, '')
         .replace(/<scene_state\b[^>]*>[\s\S]*$/gi, '');
+}
+
+// With both extensions installed, only the NSFW owner's decision controls suspension.
+// Standalone SFW retains the local detector; it never changes NSFW settings.
+function localNsfwBlocksSfw() {
+    return !nsfwExtensionInstalled() && localNsfwWindowScore() >= localNsfwThreshold();
 }
 
 function localNsfwScore(text) {
@@ -828,17 +894,6 @@ function finishReceivedGeneration() {
     generationEvents = generationEvents.filter((type) => type === 'quiet');
 }
 
-function latestNsfwSnapshot() {
-    const messages = assistantMessages();
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const message = messages[i];
-        const store = message?.extra?.[NSFW_MESSAGE_EXTRA_KEY];
-        const snapshot = store?.swipes?.[String(currentSwipeIndex(message))];
-        if (snapshot?.state) return { message, state: snapshot.state };
-    }
-    return null;
-}
-
 function infoPanelField(text, englishKey, koreanKey) {
     const source = String(text ?? '');
     const blocks = [...source.matchAll(/<Info_panel>([\s\S]*?)<\/Info_panel>/gi)].map((match) => match[1]);
@@ -854,38 +909,33 @@ function infoPanelField(text, englishKey, koreanKey) {
     return { en: en || ko, ko: ko || en };
 }
 
-function importNsfwStateForResume() {
-    const found = latestNsfwSnapshot();
-    if (!found) return null;
-    const source = found.state;
-    const characters = {};
-    for (const [name, info] of Object.entries(source.characters ?? {})) {
-        characters[name] = {
-            appearance: info?.clothing,
-            position: info?.position,
-            holding: info?.contact,
-            condition: '',
-        };
-    }
-    const state = sanitizeState({
-        scene_type: 'general',
-        location: source.location,
-        time: infoPanelField(found.message?.mes, 'Date', '날짜'),
-        environment: infoPanelField(found.message?.mes, 'Weather', '날씨'),
-        characters,
-        acts: source.acts,
-        dialogue_beats: source.dialogueBeats,
-        intensity: 0, // NSFW의 성적 온도는 SFW 서사 강도로 복사하지 않는다.
-        next: source.next,
-    });
-    if (!state) return null;
-    const at = Date.now();
-    // 복귀용 연속성 참고값이다. NSFW가 담당한 과거 답변에 SFW 기록을 덧붙이지 않는다.
-    return { state, at };
+function latestCurrentSfwSnapshot() {
+    const message = assistantMessages().at(-1);
+    if (!message || isPendingAssistant(message)) return null;
+    const snapshot = snapshotForMessage(message);
+    return snapshot?.state && snapshot.messageSignature === messageStateSignature(message) ? snapshot : null;
 }
 
-function scheduleResumeRefine() {
-    scheduleAutoRefine();
+function latestScenePanelState() {
+    const message = assistantMessages().at(-1);
+    if (!message || isPendingAssistant(message)) return null;
+    return sanitizeState({
+        location: infoPanelField(message.mes, 'Location', '장소'),
+        time: infoPanelField(message.mes, 'Date', '날짜'),
+        environment: infoPanelField(message.mes, 'Weather', '날씨'),
+    });
+}
+
+function resumeSfwFromLatest() {
+    const meta = getChatMeta(false);
+    if (!meta) return;
+    // Never promote an old NSFW heat-only report to a current SFW scene.
+    meta.manualState = null;
+    const snapshot = latestCurrentSfwSnapshot();
+    const current = parseStateFromText(assistantMessages().at(-1)?.mes) ?? snapshot?.state;
+    meta.nsfwResumePending = !current || stateCompletenessIssues(current).length > 0;
+    saveChatMeta();
+    if (meta.nsfwResumePending) scheduleAutoRefine();
 }
 
 function syncNsfwSuspension({ notify = false } = {}) {
@@ -907,22 +957,17 @@ function syncNsfwSuspension({ notify = false } = {}) {
         && !immediateHandoff
         && Number.isInteger(meta.nsfwDelegatedAtAssistantCount)
         && assistantCount <= meta.nsfwDelegatedAtAssistantCount;
-    // NSFW가 설치되어도 감지 누락/비활성 때문에 SFW가 성적 장면을 맡지 않도록 막는다.
-    // NSFW의 설정을 강제로 켜지 않으며, SFW는 자기 주입과 보조 분석만 중단한다.
-    const detected = localNsfwWindowScore() >= localNsfwThreshold();
-    const localSuspended = meta.nsfwSuspended ? !localNsfwColdStreak() : detected;
+    // 함께 설치했을 때는 NSFW의 실제 담당 판정만 따른다.
+    // 단독 SFW에서만 로컬 감지와 두 메시지 해제 기준을 사용한다.
+    const detected = localNsfwBlocksSfw();
+    const localSuspended = !nsfwExtensionInstalled()
+        && (meta.nsfwSuspended ? !localNsfwColdStreak() : detected);
     const shouldSuspend = holdsRewriteGeneration() || delegated || delegationDraining || localSuspended;
 
-    // 구버전이 이미 대기는 풀었지만 nsfw-resume만 남긴 채팅도 업데이트 즉시 복구한다.
-    if (!shouldSuspend && !meta.nsfwSuspended && meta.nsfwResumePending) {
-        const imported = importNsfwStateForResume();
-        if (imported) {
-            meta.nsfwResumePending = false;
-            meta.manualState = { state: imported.state, at: imported.at, source: 'nsfw-handoff' };
-            saveChatMeta();
-        } else {
-            scheduleResumeRefine();
-        }
+    // Recover legacy handoff values without waiting for another generated reply.
+    if (!shouldSuspend && !meta.nsfwSuspended
+        && (meta.manualState?.source === 'nsfw-handoff' || meta.nsfwResumePending)) {
+        resumeSfwFromLatest();
     }
 
     if (shouldSuspend && !meta.nsfwSuspended) {
@@ -939,15 +984,9 @@ function syncNsfwSuspension({ notify = false } = {}) {
         if (notify) toastr.info('NSFW 장면을 감지해 또또SFW는 잠시 대기해요.', '🫧또또SFW');
     } else if (!shouldSuspend && meta.nsfwSuspended) {
         meta.nsfwSuspended = false;
-        const imported = importNsfwStateForResume();
-        meta.nsfwResumePending = !imported;
         meta.nsfwDelegatedAtAssistantCount = null;
         meta.nsfwDetectionCooldownFrom = Array.isArray(getContext().chat) ? getContext().chat.length : 0;
-        meta.manualState = imported
-            ? { state: imported.state, at: imported.at, source: 'nsfw-handoff' }
-            : null;
-        saveChatMeta();
-        if (!imported) scheduleResumeRefine();
+        resumeSfwFromLatest();
         if (notify) toastr.info('장면이 잦아들어 또또SFW가 다시 개입해요.', '🫧또또SFW');
     }
     return Boolean(meta.nsfwSuspended);
@@ -1071,7 +1110,8 @@ function sanitizeState(raw) {
     clean.sceneType = SCENE_TYPE_KEYS.has(String(raw.scene_type ?? raw.sceneType))
         ? String(raw.scene_type ?? raw.sceneType)
         : 'general';
-    const intensity = Number(raw.intensity);
+    const intensity = raw.intensity === null || raw.intensity === undefined || String(raw.intensity).trim() === ''
+        ? NaN : Number(raw.intensity);
     clean.intensity = Number.isFinite(intensity) ? Math.max(0, Math.min(10, Math.round(intensity))) : null;
     const stage = raw.stage === null || raw.stage === undefined ? NaN : Number(raw.stage);
     clean.stage = Number.isFinite(stage) ? Math.max(1, Math.min(6, Math.round(stage))) : null;
@@ -1247,12 +1287,14 @@ function effectiveState() {
     const meta = getChatMeta(false);
     // NSFW 구간을 건너뛴 직후에는 이전 SFW 스냅샷을 현재 상태로 오인하지 않는다.
     // 첫 복귀 응답에서 새 전체 상태를 받으면 이 플래그가 해제된다.
-    if (meta?.nsfwResumePending) return { state: null, source: 'nsfw-resume' };
+    if (meta?.nsfwResumePending || meta?.manualState?.source === 'nsfw-handoff') {
+        return { state: latestCurrentSfwSnapshot()?.state ?? latestScenePanelState(), source: 'nsfw-resume' };
+    }
     const messages = assistantMessages();
     let lastSnapshot = null;
     for (let i = messages.length - 1; i >= 0; i--) {
         const snapshot = snapshotForMessage(messages[i]);
-        if (snapshot?.state) {
+        if (snapshot?.state && snapshot.messageSignature === messageStateSignature(messages[i])) {
             lastSnapshot = snapshot;
             break;
         }
@@ -1830,7 +1872,7 @@ function stateReportLines(settings, nextGuidance = '') {
 function buildInjection() {
     const settings = getSettings();
     const meta = getChatMeta(false);
-    if (meta?.nsfwSuspended || localNsfwWindowScore() >= localNsfwThreshold()) return '';
+    if (meta?.nsfwSuspended || localNsfwBlocksSfw()) return '';
     const resuming = Boolean(meta?.nsfwResumePending);
     const { state } = effectiveState();
     const targetActive = slowBurnTargetProgress().active;
@@ -1996,7 +2038,7 @@ function prepareSceneInjection({ consumeBridge = true, generationType } = {}) {
         const settings = getSettings();
         const meta = getChatMeta();
         const nsfwSuspended = syncNsfwSuspension();
-        if (localNsfwWindowScore() >= localNsfwThreshold() || nsfwSuspended) {
+        if (localNsfwBlocksSfw() || nsfwSuspended) {
 
             console.debug(`${LOG_PREFIX} NSFW 장면 자동 인계 — SFW 주입 생략`);
             return;
@@ -2219,6 +2261,7 @@ async function runRefine({ manual = false } = {}) {
     activeRefineTarget = target;
 
     lastAutoRefineTarget = target;
+    refineFailure = null;
     const controller = new AbortController();
     refineAbortController = controller;
     updateUi();
@@ -2264,6 +2307,7 @@ async function runRefine({ manual = false } = {}) {
             if (sameRefineTarget(lastAutoRefineTarget, target)) lastAutoRefineTarget = null;
             return false;
         }
+        refineFailure = { metadata: getContext().chatMetadata, target };
         console.error(`${LOG_PREFIX} 보정 분석 실패`, error);
 
         if (manual) toastr.error(`보정 분석 실패: ${error?.message ?? error}`, '🫧또또SFW');
@@ -2448,8 +2492,13 @@ function handleIncomingMessage(index) {
     const { changed, found, state } = harvestMessage(message);
     if (found) {
         // 새 스냅샷이 수동 보정보다 최신이므로 수동 보정은 자연히 밀려남
-        if (meta.manualState && Number(meta.manualState.at ?? 0) < Date.now()) meta.manualState = null;
-        meta.nsfwResumePending = false;
+        if (message === assistantMessages().at(-1)) {
+            if (meta.manualState && Number(meta.manualState.at ?? 0) < Date.now()) meta.manualState = null;
+            if (!stateCompletenessIssues(state ?? snapshotForMessage(message)?.state, settings).length) refineFailure = null;
+            if (meta.nsfwResumePending) {
+                meta.nsfwResumePending = stateCompletenessIssues(state ?? snapshotForMessage(message)?.state, settings).length > 0;
+            }
+        }
         saveChatMeta();
     }
     if (changed) {
@@ -2658,8 +2707,11 @@ function renderStatePanel() {
     const settings = getSettings();
     renderSlowBurnPanel(settings);
     renderCardLinkPanel(settings);
-    const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
-    element('tsf-state-source').textContent = refineRunning ? '보조 AI 분석 중…' : sourceLabel;
+    const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', 'nsfw-resume': settings.autoRefine ? '최신 장면 수집 대기' : '최신 장면 수집 대기 · 자동 보정 꺼짐', none: '아직 기록 없음' }[source] ?? source;
+    const failed = refineFailure?.metadata === getContext().chatMetadata
+        && sameRefineTarget(refineFailure.target, latestAssistantTarget());
+    element('tsf-state-source').textContent = refineRunning ? '보조 AI 분석 중…'
+        : failed ? '최신 장면 보정 실패 · 상태 다시 분석으로 재시도' : sourceLabel;
 
     const intensityBadge = element('tsf-intensity');
     if (state?.intensity !== null && state?.intensity !== undefined) {
