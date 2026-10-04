@@ -51,8 +51,8 @@ function setup({ installed = true, paired = false, owner = false, mode = 'auto',
             .replaceAll('export function ', 'function ').replace('import.meta.url', "'file:///extension/index.js'");
         vm.runInContext(`(function(){${script}\nglobalThis.${name}={${exports}};})();`, env);
     };
-    const sfw = () => load(sfwSource, 'sfw', 'getSettings,getChatMeta,scoreScene,syncNsfwSuspension,isFullyArmed,handleIncomingMessage,effectiveState,prepareSceneInjection,runRefine,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,stateForDisplay,legacyMessageStateSignature,nextBeatCandidates,nextBeatReport');
-    const nsfw = () => load(nsfwSource, 'nsfw', 'getSettings,getChatMeta,handleIncomingMessage,isFullyArmed,prepareSceneInjection,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration');
+    const sfw = () => load(sfwSource, 'sfw', 'getSettings,getChatMeta,scoreScene,syncNsfwSuspension,isFullyArmed,handleIncomingMessage,effectiveState,prepareSceneInjection,runRefine,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,stateForDisplay,legacyMessageStateSignature,nextBeatCandidates,nextBeatReport,observeLatestMessage');
+    const nsfw = () => load(nsfwSource, 'nsfw', 'getSettings,getChatMeta,handleIncomingMessage,isFullyArmed,prepareSceneInjection,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,runRefine');
     if (paired) {
         if (loadOrder === 'sfw-first') { sfw(); nsfw(); } else { nsfw(); sfw(); }
         env.nsfw.getSettings(); env.nsfw.getChatMeta();
@@ -318,7 +318,7 @@ test('changed latest reply displays its own candidates and never injects older s
     r.env.sfw.handleIncomingMessage(1);
     r.context.chat[1].mes = 'Train arrives at a different platform.';
     r.env.sfw.handleIncomingMessage(1);
-    assert.equal(r.env.sfw.effectiveState().state.next[0].en, 'Find a library book');
+    assert.equal(r.env.sfw.effectiveState().state, null);
     assert.equal(r.env.sfw.nextBeatCandidates({ forDisplay: true })[0].en, 'Board the departing train');
     assert.equal(r.env.sfw.nextBeatReport({ forDisplay: true }).source, 'body-changed');
     assert.equal(r.env.sfw.nextBeatCandidates().length, 0);
@@ -366,4 +366,53 @@ test('NSFW suspension hides SFW suggestions even when its saved report matches',
     r.meta.nsfwSuspended = true;
     assert.equal(r.env.sfw.nextBeatCandidates({ forDisplay: true }).length, 0);
     assert.equal(r.env.sfw.nextBeatCandidates().length, 0);
+});
+
+
+test('missing latest SFW report exposes only its own panel and never older facts', () => {
+    const r = setup({ chat: [msg('Old report.' + stateTag(sfwReport))] });
+    r.env.sfw.handleIncomingMessage(0);
+    r.context.chat.push(msg('New unreported reply.<Info_panel>[Location: Station]</Info_panel>'));
+    r.env.sfw.handleIncomingMessage(1);
+    const current = r.env.sfw.effectiveState();
+    assert.equal(current.source, 'missing-report');
+    assert.equal(current.state.location.en, 'Station');
+    assert.equal(Object.keys(current.state.characters).length, 0);
+    assert.equal(current.state.next.length, 0);
+    assert.equal(r.env.sfw.stateForDisplay().source, 'missing-report');
+    assert.equal(r.timers.size, 0);
+    assert.equal(r.requests, 0);
+});
+
+test('SFW repair belongs to the analyzed reply and expires on next reply or swipe', async () => {
+    const r = setup({ chat: [msg('Unreported reply.')] });
+    assert.equal(await r.env.sfw.runRefine({ manual: true }), true);
+    assert.equal(r.env.sfw.effectiveState().source, 'ai-refine');
+    r.context.chat[0].swipe_id = 1;
+    assert.equal(r.env.sfw.effectiveState().source, 'missing-report');
+    r.context.chat[0].swipe_id = 0;
+    assert.equal(r.env.sfw.effectiveState().source, 'ai-refine');
+    r.context.chat.push(msg('New unreported reply.'));
+    assert.equal(r.env.sfw.effectiveState().source, 'missing-report');
+    assert.equal(r.env.sfw.effectiveState().state, null);
+});
+
+
+for (const loadOrder of ['sfw-first', 'nsfw-first']) test(`NSFW repair updates SFW ownership without a new body: ${loadOrder}`, { skip: !nsfwSource }, async () => {
+    const r = setup({ paired: true, loadOrder, mode: 'auto', chat: [msg('Context.', true), msg('Unreported test reply.')] });
+    r.env.sfw.observeLatestMessage();
+    assert.equal(r.meta.nsfwSuspended, false);
+    const nsfwState = { location: 'Room', characters: { A: { clothing: 'Coat', position: 'Standing', contact: 'None' } }, acts: ['Read a note'], next: ['Check the timetable'], heat: 8 };
+    r.context.generateRaw = async () => JSON.stringify(nsfwState);
+    assert.equal(await r.env.nsfw.runRefine({ manual: true }), true);
+    r.env.sfw.observeLatestMessage();
+    assert.equal(r.meta.nsfwSuspended, true);
+    assert.equal(r.env.sfw.isFullyArmed(), false);
+    r.context.generateRaw = async () => JSON.stringify({ ...nsfwState, heat: 0 });
+    assert.equal(await r.env.nsfw.runRefine({ manual: true }), true);
+    r.env.sfw.observeLatestMessage();
+    assert.equal(r.meta.nsfwSuspended, false);
+    assert.equal(r.meta.nsfwResumePending, true);
+    assert.equal(r.context.extensionSettings['ttotto-sfw'].autoRefine, false);
+    assert.equal(r.context.extensionSettings['ttotto-nsfw'].autoRefine, false);
 });

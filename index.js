@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.38';
+const EXTENSION_VERSION = '0.2.39';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1691,29 +1691,39 @@ function assistantMessages() {
     return chat.filter((message) => message && !message.is_user && !message.is_system);
 }
 
-// 유효한 현재 상태: 수동 보정이 최신이면 그것을, 아니면 마지막 스냅샷을 사용.
+function currentStateTarget(message = assistantMessages().at(-1)) {
+    if (!message || isPendingAssistant(message)) return null;
+    return { index: getContext().chat.indexOf(message), swipe: currentSwipeIndex(message), signature: messageStateSignature(message) };
+}
+
+function manualMatchesLatest(manual, message, snapshot) {
+    const target = currentStateTarget(message);
+    if (!manual?.state || !target) return false;
+    if (manual.target) return manual.target.index === target.index && manual.target.swipe === target.swipe
+        && manual.target.signature === target.signature;
+    // Old AI repairs already have a matching message snapshot; unbound manual
+    // records cannot silently override a newer reply or a different swipe.
+    return manual.source === 'ai-refine' && snapshotMatchesMessage(message, snapshot)
+        && manual.at === snapshot.at;
+}
+
+// Current scene facts belong to the latest selected reply, never an older one.
 function effectiveState() {
     const meta = getChatMeta(false);
-    // NSFW 구간을 건너뛴 직후에는 이전 SFW 스냅샷을 현재 상태로 오인하지 않는다.
-    // 첫 복귀 응답에서 새 전체 상태를 받으면 이 플래그가 해제된다.
     if (meta?.nsfwResumePending || meta?.manualState?.source === 'nsfw-handoff') {
         return { state: latestCurrentSfwSnapshot()?.state ?? latestScenePanelState(), source: 'nsfw-resume' };
     }
-    const messages = assistantMessages();
-    let lastSnapshot = null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const snapshot = snapshotForMessage(messages[i]);
-        if (snapshotMatchesMessage(messages[i], snapshot)) {
-            lastSnapshot = snapshot;
-            break;
-        }
-    }
+    const message = assistantMessages().at(-1);
+    if (!message || isPendingAssistant(message)) return { state: null, source: 'none' };
+    const snapshot = snapshotForMessage(message);
+    const valid = snapshotMatchesMessage(message, snapshot);
     const manual = meta?.manualState;
-    if (manual?.state && (!lastSnapshot || Number(manual.at ?? 0) >= Number(lastSnapshot.at ?? 0))) {
+    if (manualMatchesLatest(manual, message, snapshot)
+        && (!valid || Number(manual.at ?? 0) >= Number(snapshot.at ?? 0))) {
         return { state: manual.state, source: manual.source ?? 'manual' };
     }
-    if (lastSnapshot) return { state: lastSnapshot.state, source: 'tag' };
-    return { state: null, source: 'none' };
+    if (valid) return { state: snapshot.state, source: 'tag' };
+    return { state: latestScenePanelState(), source: snapshot?.state ? 'body-changed' : 'missing-report' };
 }
 
 // Keep the saved report inspectable after an unknown body transformation. It is
@@ -2765,6 +2775,8 @@ async function runRefine({ manual = false } = {}) {
         if (panelTime) state.time = toBi(panelTime);
         if (panelWeather) state.environment = toBi(panelWeather);
         if (panelLocation) state.location = toBi(panelLocation);
+        const missing = stateCompletenessIssues(state);
+        if (missing.length) throw new Error(`보정 분석 결과에 필수 상태가 없습니다: ${missing.join(', ')}`);
         const meta = getChatMeta();
         const refinedAt = Date.now();
         // 요청을 시작한 정확한 메시지·스와이프에만 결과를 붙인다.
@@ -2776,7 +2788,7 @@ async function runRefine({ manual = false } = {}) {
             signatureVersion: 2,
         };
         persistChat();
-        meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
+        meta.manualState = { state, at: refinedAt, source: 'ai-refine', target: currentStateTarget() };
         meta.nsfwResumePending = false;
         diagnosticRecord('refine_saved', { message: target.index, swipe: target.swipeIndex, characters: Object.keys(state.characters ?? {}).length });
 
@@ -2882,7 +2894,10 @@ function schedulePostGenerationHarvest(index) {
 function observeLatestMessage() {
     if (!runtimeActive) return;
     const target = latestAssistantTarget();
-    const key = target ? `${target.index}:${target.contentSignature}` : '';
+    // A background NSFW repair changes ownership without editing the body.
+    const nsfw = getContext().chatMetadata?.[NSFW_CHAT_STATE_KEY];
+    const ownership = `${Boolean(nsfw?.autoArmed)}:${Boolean(nsfw?.forceArmed)}:${Boolean(nsfw?.bridgePending)}`;
+    const key = target ? `${target.index}:${target.contentSignature}:${ownership}` : '';
     if (!key || key === lastObservedMessageKey) return;
     lastObservedMessageKey = key;
     handleIncomingMessage(target.index);
@@ -3085,7 +3100,7 @@ function applyManualEdit(mutator) {
     const { state } = stateForDisplay();
     const base = state ? structuredClone(state) : { location: '', characters: {}, acts: [] };
     mutator(base);
-    meta.manualState = { state: sanitizeState(base) ?? base, at: Date.now(), source: 'manual' };
+    meta.manualState = { state: sanitizeState(base) ?? base, at: Date.now(), source: 'manual', target: currentStateTarget() };
     saveChatMeta();
     updateUi();
 }
@@ -3209,7 +3224,7 @@ function renderStatePanel() {
     const settings = getSettings();
     renderSlowBurnPanel(settings);
     renderCardLinkPanel(settings);
-    const sourceLabel = { 'body-changed': '저장 후 본문 변경 · 이전 수집값 표시 (현재 상태 미확인)', tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', 'nsfw-resume': settings.autoRefine ? '최신 장면 수집 대기' : '최신 장면 수집 대기 · 자동 보정 꺼짐', none: '아직 기록 없음' }[source] ?? source;
+    const sourceLabel = { 'body-changed': '저장 후 본문 변경 · 이전 수집값 표시 (현재 상태 미확인)', tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', 'nsfw-resume': settings.autoRefine ? '최신 장면 수집 대기' : '최신 장면 수집 대기 · 자동 보정 꺼짐', 'missing-report': '최신 상태 보고 누락 · 상태 다시 분석으로 복구 가능 (추가 AI 호출)', none: '아직 기록 없음' }[source] ?? source;
     const failed = refineFailure?.metadata === getContext().chatMetadata
         && sameRefineTarget(refineFailure.target, latestAssistantTarget());
     element('tsf-state-source').textContent = refineRunning ? '보조 AI 분석 중…'
@@ -3567,6 +3582,9 @@ function updateUi() {
                     : '장면을 지켜보는 중이에요';
 
         element('tsf-refine').disabled = refineRunning || nsfwSuspended;
+        element('tsf-refine-label').textContent = ['missing-report', 'body-changed'].includes(effectiveState().source)
+            ? '누락·변경 상태 복구' : '상태 다시 분석';
+        element('tsf-refine').title = '선택한 보정 연결로 최신 답변을 분석합니다. 추가 AI 호출 비용이 발생합니다.';
         element('tsf-force-arm-label').textContent = isSupervising() ? '개입 해제' : '지금 개입';
         renderStatePanel();
 
