@@ -1,3 +1,8 @@
+/* The settings panel is available only through the wand popup. */
+#ttotto-sfw-settings:not(.tsf-in-popup) {
+    display: none !important;
+}
+
 #ttotto-sfw-settings {
     box-sizing: border-box;
     min-width: 0;
