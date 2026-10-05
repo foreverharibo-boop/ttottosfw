@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.41';
+const EXTENSION_VERSION = '0.2.42';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -3989,9 +3989,10 @@ function openPopup() {
     const overlay = document.getElementById('tsf-overlay');
     const box = document.getElementById('tsf-popup-box');
     if (!panel || !overlay || !box) return;
-    if (!settingsHomeParent) settingsHomeParent = panel.parentElement;
+    settingsHomeParent = ensureSettingsHome();
     document.getElementById('tsf-popup-body').append(panel);
     panel.classList.add('tsf-in-popup');
+    panel.hidden = false;
     // 드로어가 접혀 있었어도 팝업에서는 무조건 펼침 (인라인 강제)
     const drawerContent = panel.querySelector('.inline-drawer-content');
     if (drawerContent) drawerContent.style.setProperty('display', 'block', 'important');
@@ -4010,7 +4011,9 @@ function closePopup() {
     const overlay = document.getElementById('tsf-overlay');
     const panel = document.getElementById('ttotto-sfw-settings');
     if (overlay) overlay.style.cssText = `display:none !important; ${TSF_OVERLAY_BASE_CSS}`;
-    if (panel && settingsHomeParent) {
+    if (panel) {
+        panel.hidden = true;
+        settingsHomeParent = ensureSettingsHome();
         panel.classList.remove('tsf-in-popup');
         const drawerContent = panel.querySelector('.inline-drawer-content');
         if (drawerContent) drawerContent.style.removeProperty('display');
@@ -4048,6 +4051,19 @@ async function loadSettingsHtml() {
     return response.text();
 }
 
+// Keep settings outside SillyTavern's extension tab, even with stale CSS.
+function ensureSettingsHome() {
+    let home = document.getElementById('tsf-settings-home');
+    if (!home) {
+        home = document.createElement('div');
+        home.id = 'tsf-settings-home';
+        home.hidden = true;
+        home.style.setProperty('display', 'none', 'important');
+        document.body.append(home);
+    }
+    return home;
+}
+
 async function initializeUi() {
     syncStateTagDisplayGuard();
     if (uiReady && document.getElementById('ttotto-sfw-settings')) {
@@ -4055,8 +4071,8 @@ async function initializeUi() {
         updateUi();
         return;
     }
-    const container = document.getElementById('extensions_settings2') ?? document.getElementById('extensions_settings');
-    if (!container) throw new Error('확장 설정 컨테이너를 찾을 수 없습니다.');
+    const container = ensureSettingsHome();
+    settingsHomeParent = container;
     if (!document.getElementById('ttotto-sfw-settings')) {
         const html = await loadSettingsHtml();
         if (!runtimeActive) return;
@@ -4193,8 +4209,7 @@ async function initialize() {
 function requestInitialize() {
     if (!runtimeActive) return;
     // APP_READY가 이미 끝난 뒤 설치/활성화되어도 현재 DOM으로 초기화한다.
-    const container = document.getElementById('extensions_settings2') ?? document.getElementById('extensions_settings');
-    if (!container) return;
+    if (!document.body) return;
     void initialize().catch((error) => {
         console.error(`${LOG_PREFIX} 초기화 실패`, error);
         toastr.error(`초기화 실패: ${error?.message ?? error}`, "🫧또또SFW");
