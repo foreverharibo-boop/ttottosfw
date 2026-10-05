@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.43';
+const EXTENSION_VERSION = '0.2.44';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -454,9 +454,157 @@ const diagnosticReaders = new Set();
 const diagnosticResponseSlots = new Set();
 let diagnosticBodies = new Map();
 let diagnosticResponses = [];
+const diagnosticBodyWatches = new Map();
+let diagnosticOwnBodyWrite = null;
+let diagnosticWriting = false;
+// Shared observation only: each extension retains its own collection/state engine.
+const diagnosticWatchRegistryKey = Symbol.for('ttotto.body-write-observers.v1');
+const diagnosticWatchRegistry = globalThis[diagnosticWatchRegistryKey] ??= new WeakMap();
+const diagnosticChatId = () => getContext().getCurrentChatId?.() ?? getContext().chatId;
+function diagnosticUnwatchBody(message) {
+    const watch = diagnosticBodyWatches.get(message);
+    if (!watch) return;
+    const shared = watch.shared;
+    shared.listeners.delete(watch.listener);
+    diagnosticBodyWatches.delete(message);
+    if (shared.listeners.size) return;
+    const descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
+    if (descriptor?.get === shared.get && descriptor?.set === shared.set && descriptor.configurable) {
+        Object.defineProperty(message, 'mes', { ...shared.original, value: shared.value });
+    }
+    if (diagnosticWatchRegistry.get(message) === shared) diagnosticWatchRegistry.delete(message);
+}
+function diagnosticWriteBody(message, text) {
+    const previous = diagnosticOwnBodyWrite;
+    diagnosticOwnBodyWrite = message;
+    try { message.mes = text; }
+    finally { diagnosticOwnBodyWrite = previous; }
+}
 function resetDiagnosticEvidence() {
+    for (const message of diagnosticBodyWatches.keys()) diagnosticUnwatchBody(message);
     for (const reader of diagnosticReaders) { try { void reader.cancel().catch(() => {}); } catch {} }
     diagnosticReaders.clear(); diagnosticResponseSlots.clear(); diagnosticBodies.clear(); diagnosticResponses = [];
+}
+function diagnosticStage(state, prefix = 'reported') {
+    const value = state?.stage;
+    const present = value !== null && value !== undefined && Number.isFinite(Number(value));
+    return { [`${prefix}StagePresent`]: present, ...(present ? { [`${prefix}Stage`]: Number(value) } : {}) };
+}
+function diagnosticBodyDiff(old, text) {
+    let start = 0, endOld = old.length, endNew = text.length;
+    while (start < Math.min(endOld, endNew) && old[start] === text[start]) start++;
+    while (endOld > start && endNew > start && old[endOld - 1] === text[endNew - 1]) { endOld--; endNew--; }
+    const withoutSpace = s => s.replace(/\s/g, '');
+    const withoutMarkup = s => withoutSpace(s.replace(/<[^>]*>/g, '').replace(/[*_`]/g, ''));
+    const counts = (part, prefix) => ({
+        [`${prefix}Letters`]: (part.match(/\p{L}/gu) ?? []).length,
+        [`${prefix}Digits`]: (part.match(/\p{N}/gu) ?? []).length,
+        [`${prefix}Whitespace`]: (part.match(/\s/gu) ?? []).length,
+        [`${prefix}Punctuation`]: (part.match(/\p{P}/gu) ?? []).length,
+    });
+    return {
+        beforeChars: old.length, afterChars: text.length, changeStart: start,
+        removedChars: endOld - start, addedChars: endNew - start,
+        ...counts(old.slice(start, endOld), 'removed'), ...counts(text.slice(start, endNew), 'added'),
+        sameSceneBody: stateRecordBody(old) === stateRecordBody(text),
+        whitespaceOnly: withoutSpace(old) === withoutSpace(text),
+        markupOnly: withoutMarkup(old) === withoutMarkup(text),
+        oldOpenTag: /<sfw_scene\b/i.test(old), newOpenTag: /<sfw_scene\b/i.test(text),
+    };
+}
+// Only public client script paths are allowed; omit hosts, queries, fragments,
+// function names, arbitrary filesystem paths and all raw stack text.
+function diagnosticSafeScript(path) {
+    return typeof path === 'string' && path.length <= 200
+        && /^(?:\/script\.js|\/scripts\/(?:[a-zA-Z0-9_-]{1,64}\/){0,8}[a-zA-Z0-9_.-]{1,64}\.m?js)$/.test(path);
+}
+function diagnosticWriteTrace(stack) {
+    const lines = String(stack ?? '').split('\n').filter(line => line.trim() && line.trim() !== 'Error');
+    // The first frame is our setter. Keep the immediate caller even if unknown;
+    // a recognized later frame must never be mistaken for the direct writer.
+    return lines.slice(1, 7).map(line => {
+        const match = line.match(/(https?:\/\/[^\s()]+):(\d+):(\d+)\)?\s*$/);
+        if (!match) return { source: 'unknown' };
+        try {
+            const url = new URL(match[1]);
+            if (url.origin !== globalThis.location?.origin || !diagnosticSafeScript(url.pathname)) return { source: 'unknown' };
+            return { source: 'client_script', script: url.pathname, line: Number(match[2]), column: Number(match[3]) };
+        } catch { return { source: 'unknown' }; }
+    });
+}
+function diagnosticWatchBody(message, index, swipe, chat) {
+    const existing = diagnosticBodyWatches.get(message);
+    let descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
+    if (existing && existing.chat === chat && existing.chatId === diagnosticChatId()
+        && descriptor?.get === existing.shared.get && descriptor?.set === existing.shared.set) {
+        existing.swipe = swipe;
+        return;
+    }
+    if (existing) diagnosticUnwatchBody(message);
+    descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
+    let shared = diagnosticWatchRegistry.get(message);
+    if (!shared || descriptor?.get !== shared.get || descriptor?.set !== shared.set) {
+        // Never wrap a foreign accessor, even if a former observer was replaced.
+        if (!descriptor?.configurable || !descriptor.writable || typeof descriptor.value !== 'string') {
+            diagnosticRecord('body_write_trace_unavailable', { reason: 'unsupported_descriptor', message: index, swipe }, chat);
+            return;
+        }
+        shared = { original: descriptor, value: descriptor.value, listeners: new Set(), writing: false };
+        shared.get = function () { return shared.value; };
+        shared.set = function (value) {
+            if (this !== message) {
+                Object.defineProperty(this, 'mes', { value, writable: true, configurable: true, enumerable: true });
+                return;
+            }
+            const old = shared.value;
+            shared.value = value; // Actual assignment always succeeds before observation.
+            if (shared.writing || old === value) return;
+            shared.writing = true;
+            try {
+                const trace = diagnosticWriteTrace(new Error().stack);
+                for (const listener of [...shared.listeners]) {
+                    try { listener(old, value, trace); } catch { /* Do not disrupt another observer. */ }
+                }
+            } catch { /* Diagnostics must never make an assignment fail. */ }
+            finally { shared.writing = false; }
+        };
+        try {
+            Object.defineProperty(message, 'mes', { configurable: true, enumerable: descriptor.enumerable, get: shared.get, set: shared.set });
+            diagnosticWatchRegistry.set(message, shared);
+        } catch {
+            diagnosticRecord('body_write_trace_unavailable', { reason: 'unsupported_descriptor', message: index, swipe }, chat);
+            return;
+        }
+    }
+    const watch = { shared, swipe, chat, chatId: diagnosticChatId() };
+    watch.listener = (old, value, writeTrace) => {
+        if (diagnosticWriting) return;
+        diagnosticWriting = true;
+        try {
+            if (!diagnosticsEnabled()) { diagnosticUnwatchBody(message); return; }
+            const actualIndex = getContext().chat?.indexOf(message) ?? -1;
+            if (watch.chat !== diagnosticScope() || watch.chatId !== diagnosticChatId()
+                || actualIndex < 0 || message.is_user || message.is_system) {
+                diagnosticUnwatchBody(message); return;
+            }
+            if (watch.swipe !== currentSwipeIndex(message)) {
+                diagnosticRecord('body_write_trace_unavailable', { reason: 'swipe_changed', message: actualIndex }, chat);
+                diagnosticUnwatchBody(message); return;
+            }
+            if (typeof old !== 'string' || typeof value !== 'string' || Math.max(old.length, value.length) > 65536) {
+                diagnosticRecord('body_write_trace_unavailable', { reason: 'size_or_type_limit', message: actualIndex }, chat);
+                diagnosticUnwatchBody(message); return;
+            }
+            diagnosticRecord('body_write', { message: actualIndex, swipe: watch.swipe,
+                ownWrite: diagnosticOwnBodyWrite === message,
+                writerLocated: writeTrace[0]?.source === 'client_script', writeTrace,
+                ...diagnosticBodyDiff(old, value), ...diagnosticCache(message) }, chat);
+        } finally { diagnosticWriting = false; }
+    };
+    shared.listeners.add(watch.listener);
+    diagnosticBodyWatches.set(message, watch);
+    if (diagnosticBodyWatches.size > 12) diagnosticUnwatchBody(diagnosticBodyWatches.keys().next().value);
+    diagnosticRecord('body_write_trace_started', { message: index, swipe }, chat);
 }
 function diagnosticNsfwReport(text) {
     const blocks = [...String(text ?? '').matchAll(/<scene_state\b[^>]*>([\s\S]*?)<\/scene_state>/gi)];
@@ -476,7 +624,7 @@ function diagnosticTextShape(text) {
         chars: text.length, bodyChars: stateRecordBody(text).length,
         openTag: /<sfw_scene\b/i.test(text), closeTag: /<\/sfw_scene\s*>/i.test(text),
         escapedTag: /&lt;sfw_scene\b/i.test(text), nsfwTag: /<scene_state\b/i.test(text),
-        parsed: Boolean(state), characters: Object.keys(state?.characters ?? {}).length,
+        parsed: Boolean(state), ...diagnosticStage(state), characters: Object.keys(state?.characters ?? {}).length,
         objects: Object.keys(state?.importantObjects ?? {}).length, nextCandidates: state?.next?.length ?? 0, ...diagnosticNsfwReport(text),
         missing: state ? stateCompletenessIssues(state) : ['state'],
     };
@@ -501,19 +649,8 @@ function diagnosticTrackBody(message, index, phase) {
         diagnosticRecord('body_checkpoint', { reason: phase, message: index, swipe, ...diagnosticTextShape(text) }, chat);
         diagnosticLink(message, index, text, chat);
     } else if (previous.text !== text) {
-        const old = previous.text;
-        let start = 0, endOld = old.length, endNew = text.length;
-        while (start < Math.min(endOld, endNew) && old[start] === text[start]) start++;
-        while (endOld > start && endNew > start && old[endOld - 1] === text[endNew - 1]) { endOld--; endNew--; }
-        const withoutSpace = s => s.replace(/\s/g, '');
-        const withoutMarkup = s => withoutSpace(s.replace(/<[^>]*>/g, '').replace(/[*_`]/g, ''));
         diagnosticRecord('body_changed', {
-            reason: phase, message: index, swipe, beforeChars: old.length, afterChars: text.length,
-            removedChars: endOld - start, addedChars: endNew - start,
-            sameSceneBody: stateRecordBody(old) === stateRecordBody(text),
-            whitespaceOnly: withoutSpace(old) === withoutSpace(text),
-            markupOnly: withoutMarkup(old) === withoutMarkup(text),
-            oldOpenTag: /<sfw_scene\b/i.test(old), newOpenTag: /<sfw_scene\b/i.test(text),
+            reason: phase, message: index, swipe, ...diagnosticBodyDiff(previous.text, text),
         }, chat);
         diagnosticLink(message, index, text, chat);
     }
@@ -522,7 +659,9 @@ function diagnosticTrackBody(message, index, phase) {
         diagnosticBodies.delete(message);
         diagnosticBodies.set(message, { text, swipe, index, chat });
         if (diagnosticBodies.size > 12) diagnosticBodies.delete(diagnosticBodies.keys().next().value);
+        if (getContext().chat?.[index] === message) diagnosticWatchBody(message, index, swipe, chat);
     } else {
+        diagnosticUnwatchBody(message);
         diagnosticBodies.delete(message);
         diagnosticRecord('body_checkpoint_skipped', { reason: 'size_limit', message: index, swipe }, chat);
     }
@@ -637,6 +776,11 @@ function diagnosticRecord(stage, data = {}, chat = diagnosticScope()) {
         else if (key === 'stageSource' && ['manual', 'reported', 'intensity', 'unknown'].includes(value)) values[key] = value;
         else if (key === 'reason' && /^[a-z_-]{1,48}$/.test(value)) values[key] = value;
         else if (key === 'missing' && Array.isArray(value)) values[key] = value.filter(v => ['state', 'location', 'characters', 'acts', 'intensity', 'stage', 'next'].includes(v));
+        else if (key === 'writeTrace' && Array.isArray(value)) values[key] = value.slice(0, 6).map(frame =>
+            frame?.source === 'client_script' && diagnosticSafeScript(frame.script)
+                && Number.isSafeInteger(frame.line) && frame.line > 0 && Number.isSafeInteger(frame.column) && frame.column > 0
+                ? { source: 'client_script', script: frame.script, line: frame.line, column: frame.column }
+                : { source: 'unknown' });
     }
     const previous = diagnosticRows.at(-1);
     if (previous?.stage === stage && previous.chat === chat && JSON.stringify(previous.data) === JSON.stringify(values)) {
@@ -650,10 +794,13 @@ function diagnosticRecord(stage, data = {}, chat = diagnosticScope()) {
 }
 function diagnosticState() {
     const stageInfo = slowBurnStageInfo();
+    const current = effectiveState();
     const settings = getContext().extensionSettings?.[MODULE_NAME] ?? {};
     const meta = getContext().chatMetadata?.[CHAT_STATE_KEY] ?? {};
     const nsfw = getContext().chatMetadata?.[NSFW_CHAT_STATE_KEY] ?? {};
-    return { displayedStage: stageInfo.stage, stageSource: stageInfo.source, enabled: Boolean(settings.enabled), chatEnabled: Boolean(meta.enabled), autoRefine: Boolean(settings.autoRefine),
+    return { ...diagnosticStage(current.state, 'current'), displayedStage: stageInfo.stage, stageSource: stageInfo.source, enabled: Boolean(settings.enabled), chatEnabled: Boolean(meta.enabled), autoRefine: Boolean(settings.autoRefine),
+        slowBurnEnabled: Boolean(settings.slowBurnEnabled), slowBurnLocked: Boolean(meta.slowBurnLocked),
+        latestReportMissing: current.source === 'missing-report', latestBodyChanged: current.source === 'body-changed',
         suspended: Boolean(meta.nsfwSuspended), resumePending: Boolean(meta.nsfwResumePending),
         nsfwAutoArmed: Boolean(nsfw.autoArmed), nsfwArmedByHeat: nsfw.armSource === 'heat', nsfwArmedLocally: nsfw.armSource === 'local', nsfwForceArmed: Boolean(nsfw.forceArmed), nsfwBridge: Boolean(nsfw.bridgePending),
         refineRunning, pendingGenerations: generationEvents.length };
@@ -661,6 +808,7 @@ function diagnosticState() {
 function diagnosticReport() {
     return JSON.stringify({ extension: MODULE_NAME, version: EXTENSION_VERSION, recording: diagnosticsEnabled(),
         note: 'Memory-only; no API keys or dialogue contents. request_observed means the fetch boundary, not proof of model receipt. server_response_observed describes a bounded response copy at the fetch boundary, not guaranteed provider-original output if another wrapper precedes this one. Response/message links require matching bodies; unmatched or ambiguous results are unconfirmed. No raw bodies are exported.',
+        bodyWriteNote: 'body_write observes assignments to watched message fields, not the origin of computed text. writeTrace contains only same-origin client script paths and line/column numbers, never full URLs or raw stacks. Unknown frames and writes before observation or via object/descriptor replacement are unconfirmed. Change counts describe one enclosing difference range. No raw dialogue is exported.',
         current: diagnosticState(), events: diagnosticRows }, null, 2);
 }
 function renderDiagnostics() {
@@ -702,7 +850,7 @@ function diagnosticResponse(message, index) {
         message: index, swipe: currentSwipeIndex(message), chars: text.length,
         openTag: /<sfw_scene\b/i.test(text), closeTag: /<\/sfw_scene\s*>/i.test(text),
         escapedTag: /&lt;sfw_scene\b/i.test(text), nsfwTag: /<scene_state\b/i.test(text),
-        parsed: Boolean(state), ...diagnosticCache(message),
+        parsed: Boolean(state), ...diagnosticStage(state), ...diagnosticCache(message),
         characters: Object.keys(state?.characters ?? {}).length,
         objects: Object.keys(state?.importantObjects ?? {}).length, nextCandidates: state?.next?.length ?? 0, ...diagnosticNsfwReport(text),
         missing: state ? stateCompletenessIssues(state) : ['state'], ...diagnosticState(),
@@ -1655,6 +1803,7 @@ function diagnosticCache(message) {
         savedCharacters: Object.keys(snapshot?.state?.characters ?? {}).length,
         savedObjects: Object.keys(snapshot?.state?.importantObjects ?? {}).length,
         savedNextCandidates: snapshot?.state?.next?.length ?? 0,
+        ...diagnosticStage(snapshot?.state, 'saved'),
         legacySignature: Boolean(snapshot && snapshot.signatureVersion !== 2),
     };
 }
@@ -1675,7 +1824,7 @@ function harvestMessage(message) {
     const state = parseStateFromText(message.mes);
     const strippedMes = stripStateTag(message.mes);
     if (strippedMes !== message.mes) {
-        message.mes = strippedMes;
+        diagnosticWriteBody(message, strippedMes);
         changed = true;
     }
     if (Array.isArray(message.swipes) && typeof message.swipes[swipeIndex] === 'string') {
@@ -3009,7 +3158,7 @@ function handleIncomingMessage(index) {
         globalThis.ttottoNsfwSceneBridge?.collect?.(message);
         let changed = false;
         const stripped = stripStateTag(message.mes);
-        if (stripped !== message.mes) { message.mes = stripped; changed = true; }
+        if (stripped !== message.mes) { diagnosticWriteBody(message, stripped); changed = true; }
         const swipe = currentSwipeIndex(message);
         if (typeof message.swipes?.[swipe] === 'string') {
             const clean = stripStateTag(message.swipes[swipe]);
@@ -4170,7 +4319,7 @@ function registerEvents() {
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
         diagnosticRecord('chat_changed');
-        diagnosticBodies.clear();
+        resetDiagnosticEvidence();
         rewriteGeneration = null;
         generationEvents = [];
         lastCompletedAssistant = null;

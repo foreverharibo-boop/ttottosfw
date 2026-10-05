@@ -25,13 +25,121 @@ function runtime(enabled = true, suppliedResponse = null) {
     vm.createContext(env);
     const script = source.slice(0, source.indexOf('const bootContext = getContext();'))
         .replaceAll('export function ', 'function ').replace('import.meta.url', "'file:///extension/index.js'");
-    vm.runInContext(script + '\nglobalThis.api={getSettings,syncDiagnosticFetch,stopDiagnosticFetch,diagnosticRecord,diagnosticReport,clearDiagnostics,handleIncomingMessage,prepareSceneInjection,diagnosticInspectResponse,diagnosticTrackBody};', env);
+    vm.runInContext(script + '\nglobalThis.api={getSettings,syncDiagnosticFetch,stopDiagnosticFetch,diagnosticRecord,diagnosticReport,clearDiagnostics,handleIncomingMessage,prepareSceneInjection,diagnosticInspectResponse,diagnosticTrackBody,diagnosticWriteTrace};', env, { filename: 'http://localhost:8000/scripts/extensions/third-party/ttottosfw/index.js' });
     env.api.getSettings();
     return { env, api: env.api, context, settings, prompts, calls, original, response, promise,
         report: () => JSON.parse(env.api.diagnosticReport()), rows: () => JSON.parse(env.api.diagnosticReport()).events };
 }
 const state = { location: 'PRIVATE ROOM', characters: { PRIVATE_NAME: { appearance: 'PRIVATE CLOTHES', position: 'Standing' } }, acts: ['PRIVATE ACT'], intensity: 1, next: ['Rest'] };
 const stateTag = `<sfw_scene>${JSON.stringify(state)}</sfw_scene>`;
+test('40-character post-collection deletion identifies the writer and stage invalidation without dialogue', () => {
+    const r = runtime(); r.settings.slowBurnEnabled = true;
+    const body = 'R'.repeat(1374) + 'X'.repeat(40);
+    r.context.chat.push({ mes: body + `<sfw_scene>${JSON.stringify({ ...state, stage: 5, heat: 8 })}</sfw_scene>` });
+    r.api.handleIncomingMessage(0);
+    const own = r.rows().find(e => e.stage === 'body_write').data;
+    assert.equal(own.ownWrite, true); assert.equal(own.sameSceneBody, true);
+    assert.equal(r.report().current.currentStage, 5);
+    assert.equal(r.report().current.stageSource, 'reported');
+    vm.runInContext('SillyTavern.getContext().chat[0].mes = SillyTavern.getContext().chat[0].mes.slice(0, -40)', r.env,
+        { filename: 'http://localhost:8000/scripts/extensions/third-party/test-cleaner/index.js?key=PRIVATE_KEY#PRIVATE_FRAGMENT' });
+    const write = r.rows().filter(e => e.stage === 'body_write').at(-1).data;
+    assert.equal(write.beforeChars, 1414); assert.equal(write.afterChars, 1374);
+    assert.equal(write.removedChars, 40); assert.equal(write.removedLetters, 40);
+    assert.equal(write.addedChars, 0); assert.equal(write.changeStart, 1374);
+    assert.equal(write.ownWrite, false); assert.equal(write.writerLocated, true);
+    assert.equal(write.writeTrace[0].script, '/scripts/extensions/third-party/test-cleaner/index.js');
+    assert.equal(write.savedStage, 5); assert.equal(write.cached, false);
+    r.api.handleIncomingMessage(0);
+    assert.equal(r.report().current.currentStagePresent, false);
+    assert.equal(r.report().current.latestBodyChanged, true);
+    assert.equal(r.report().current.stageSource, 'unknown');
+    assert.equal(r.report().current.displayedStage, null);
+    assert.equal(r.settings.autoRefine, false); assert.equal(r.calls.length, 0);
+    assert.ok(r.rows().some(e => e.stage === 'cache_invalidated' && e.data.savedStage === 5));
+    const exported = r.api.diagnosticReport();
+    for (const secret of ['PRIVATE_KEY', 'PRIVATE_FRAGMENT', 'PRIVATE_NAME', 'PRIVATE ROOM', 'RRRRR', 'XXXXX', 'http://localhost']) assert.ok(!exported.includes(secret), secret);
+});
+test('stage omission is distinct from a saved stage invalidated later', () => {
+    const r = runtime(); r.settings.slowBurnEnabled = true;
+    r.context.chat.push({ mes: 'Reply.' + stateTag }); r.api.handleIncomingMessage(0);
+    const observed = r.rows().find(e => e.stage === 'response_observed').data;
+    assert.equal(observed.reportedStagePresent, false); assert.ok(observed.missing.includes('stage'));
+    assert.equal(r.report().current.currentStagePresent, false); assert.equal(r.report().current.stageSource, 'intensity');
+    r.context.chatMetadata.ttottoSfw.slowBurnStageOverride = 3;
+    assert.equal(r.report().current.displayedStage, 3); assert.equal(r.report().current.stageSource, 'manual');
+});
+for (const stop of ['disable', 'clear', 'chat-change']) test(`body tracing releases descriptors and keeps actual text on ${stop}`, () => {
+    const r = runtime(), message = { mes: 'Before' }; r.context.chat.push(message);
+    r.api.diagnosticTrackBody(message, 0, 'before_collection');
+    assert.equal(typeof Object.getOwnPropertyDescriptor(message, 'mes').set, 'function');
+    message.mes = 'After';
+    assert.equal(JSON.stringify(message), '{"mes":"After"}'); assert.equal(structuredClone(message).mes, 'After');
+    if (stop === 'disable') { r.settings.diagnosticsEnabled = false; r.api.syncDiagnosticFetch(); }
+    else if (stop === 'clear') r.api.clearDiagnostics();
+    else { r.context.chatMetadata = {}; r.context.chat = []; message.mes = 'New chat ignored'; }
+    const descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
+    assert.equal(descriptor.get, undefined); assert.equal(descriptor.writable, true);
+    assert.equal(descriptor.value, stop === 'chat-change' ? 'New chat ignored' : 'After');
+    const count = r.rows().length; message.mes = 'Unwatched'; assert.equal(r.rows().length, count);
+});
+test('trace never wraps existing accessors or non-configurable fields or replaces a later foreign descriptor', () => {
+    const r = runtime(), message = {}; let value = 'Private';
+    const getter = () => value, setter = next => { value = next; };
+    Object.defineProperty(message, 'mes', { configurable: true, get: getter, set: setter });
+    r.context.chat.push(message); r.api.diagnosticTrackBody(message, 0, 'before_collection');
+    assert.equal(Object.getOwnPropertyDescriptor(message, 'mes').get, getter);
+    Object.defineProperty(message, 'mes', { configurable: true, value: 'Plain', writable: true });
+    r.api.diagnosticTrackBody(message, 0, 'before_collection');
+    Object.defineProperty(message, 'mes', { configurable: true, get: getter, set: setter });
+    r.api.clearDiagnostics(); assert.equal(Object.getOwnPropertyDescriptor(message, 'mes').get, getter);
+    Object.defineProperty(message, 'mes', { configurable: false });
+    r.api.diagnosticTrackBody(message, 0, 'before_collection');
+    assert.ok(r.rows().some(e => e.stage === 'body_write_trace_unavailable'));
+});
+test('trace is bounded and does not misattribute swipe changes, user messages or replaced message objects', () => {
+    const r = runtime();
+    for (let index = 0; index < 13; index++) {
+        const message = { mes: 'Reply', swipe_id: 0 }; r.context.chat.push(message);
+        r.api.diagnosticTrackBody(message, index, 'before_collection');
+    }
+    assert.equal(Object.getOwnPropertyDescriptor(r.context.chat[0], 'mes').get, undefined);
+    const message = r.context.chat[12];
+    message.mes = message.mes; assert.ok(!r.rows().some(e => e.stage === 'body_write'));
+    message.swipe_id = 1; message.mes = 'Different swipe';
+    assert.ok(!r.rows().some(e => e.stage === 'body_write'));
+    assert.ok(r.rows().some(e => e.data.reason === 'swipe_changed'));
+    r.api.diagnosticTrackBody(message, 12, 'message_swiped');
+    message.mes = 'Edited swipe';
+    assert.equal(r.rows().filter(e => e.stage === 'body_write').at(-1).data.swipe, 1);
+    r.context.chat[12] = { mes: 'Replacement' };
+    const count = r.rows().length; message.mes = 'Old detached object'; assert.equal(r.rows().length, count);
+    r.context.chat[11].is_user = true; r.context.chat[11].mes = 'User text'; assert.equal(r.rows().length, count);
+});
+test('large or non-string assignments still succeed without retaining diagnostic text', () => {
+    const r = runtime(), message = { mes: 'Original' }; r.context.chat.push(message);
+    r.api.diagnosticTrackBody(message, 0, 'before_collection');
+    message.mes = 'x'.repeat(65537);
+    assert.equal(message.mes.length, 65537); assert.equal(Object.getOwnPropertyDescriptor(message, 'mes').get, undefined);
+    message.mes = 'Again'; r.api.diagnosticTrackBody(message, 0, 'before_collection');
+    message.mes = null; assert.equal(message.mes, null);
+    assert.ok(r.rows().some(e => e.data.reason === 'size_or_type_limit'));
+});
+test('stack sanitization handles Chrome and Firefox and preserves unknown direct callers', () => {
+    const r = runtime();
+    const own = 'http://localhost:8000/scripts/extensions/third-party/ttottosfw/index.js:1:2';
+    for (const stack of [`Error\n at set (${own})\n at PRIVATE_FUNCTION (http://localhost:8000/script.js?token=PRIVATE_KEY:30:4)`,
+        `set@${own}\nPRIVATE_FUNCTION@http://localhost:8000/script.js?token=PRIVATE_KEY:30:4`]) {
+        const frames = r.api.diagnosticWriteTrace(stack);
+        assert.equal(frames[0].script, '/script.js'); assert.equal(frames[0].line, 30); assert.equal(frames[0].column, 4);
+        assert.ok(!JSON.stringify(frames).includes('PRIVATE'));
+    }
+    for (const unknown of ['at /home/PRIVATE_NAME/index.js:1:2', 'at http://foreign.example/scripts/index.js:1:2', 'at http://localhost:8000/private/PRIVATE_KEY.js:1:2', 'at eval (<anonymous>:1:2)']) {
+        const frames = r.api.diagnosticWriteTrace(`Error\n at set (${own})\n ${unknown}\n at http://localhost:8000/script.js:5:6`);
+        assert.equal(frames[0].source, 'unknown'); assert.equal(frames[1].script, '/script.js');
+        assert.ok(!JSON.stringify(frames).includes('PRIVATE'));
+    }
+});
 test('disabled diagnostics do not install a fetch hook or retain collection events', () => {
     const r = runtime(false); r.api.syncDiagnosticFetch(); r.context.chat.push({ mes: stateTag });
     r.api.handleIncomingMessage(0);
@@ -254,4 +362,16 @@ test('conditional return-report requests are recognized at the fetch boundary', 
     const row = r.rows().find(e => e.stage === 'request_observed').data;
     assert.equal(row.returnReport, true); assert.equal(row.reportInstruction, true);
     assert.equal(row.sfwDirective, false);
+});
+
+test('inherited assignments and same-metadata chat ID switches retain native semantics', () => {
+    const r = runtime(), message = { mes: 'Parent' }; r.context.chat.push(message); r.context.chatId = 'first';
+    r.api.diagnosticTrackBody(message, 0, 'before_collection');
+    const child = Object.create(message); child.mes = 'Child';
+    assert.equal(message.mes, 'Parent'); assert.equal(child.mes, 'Child');
+    assert.equal(Object.getOwnPropertyDescriptor(child, 'mes').writable, true);
+    assert.ok(!r.rows().some(e => e.stage === 'body_write'));
+    r.context.chatId = 'second'; message.mes = 'Different chat';
+    assert.equal(Object.getOwnPropertyDescriptor(message, 'mes').get, undefined);
+    assert.ok(!r.rows().some(e => e.stage === 'body_write'));
 });
