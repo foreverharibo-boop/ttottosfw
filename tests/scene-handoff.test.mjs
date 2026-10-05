@@ -51,7 +51,7 @@ function setup({ installed = true, paired = false, owner = false, mode = 'auto',
             .replaceAll('export function ', 'function ').replace('import.meta.url', "'file:///extension/index.js'");
         vm.runInContext(`(function(){${script}\nglobalThis.${name}={${exports}};})();`, env);
     };
-    const sfw = () => load(sfwSource, 'sfw', 'getSettings,getChatMeta,scoreScene,syncNsfwSuspension,isFullyArmed,handleIncomingMessage,effectiveState,prepareSceneInjection,runRefine,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,stateForDisplay,legacyMessageStateSignature,nextBeatCandidates,nextBeatReport,observeLatestMessage');
+    const sfw = () => load(sfwSource, 'sfw', 'getSettings,getChatMeta,scoreScene,syncNsfwSuspension,isFullyArmed,handleIncomingMessage,effectiveState,prepareSceneInjection,runRefine,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,stateForDisplay,legacyMessageStateSignature,nextBeatCandidates,nextBeatReport,observeLatestMessage,onClean,recentActs');
     const nsfw = () => load(nsfwSource, 'nsfw', 'getSettings,getChatMeta,handleIncomingMessage,isFullyArmed,prepareSceneInjection,finishReceivedGeneration,beginSceneGeneration,finishSceneGeneration,runRefine');
     if (paired) {
         if (loadOrder === 'sfw-first') { sfw(); nsfw(); } else { nsfw(); sfw(); }
@@ -415,4 +415,54 @@ for (const loadOrder of ['sfw-first', 'nsfw-first']) test(`NSFW repair updates S
     assert.equal(r.meta.nsfwResumePending, true);
     assert.equal(r.context.extensionSettings['ttotto-sfw'].autoRefine, false);
     assert.equal(r.context.extensionSettings['ttotto-nsfw'].autoRefine, false);
+});
+
+
+test('companion trailing acknowledgement removal keeps the SFW snapshot valid', () => {
+    const r=setup({chat:[msg('Morning discussion.'+stateTag(sfwReport)+heatTag(0)+'\nNo changes')]});
+    r.env.sfw.handleIncomingMessage(0);
+    r.context.chat[0].mes = r.context.chat[0].mes.replace(heatTag(0)+'\nNo changes','');
+    assert.equal(r.env.sfw.effectiveState().state?.characters?.A?.position.en,'Sofa');
+});
+
+test('disabled SFW manual repair does not start a paid request', async () => {
+    const r=setup({chat:[msg('Morning discussion.')]});
+    r.context.extensionSettings['ttotto-sfw'].enabled=false;
+    assert.equal(await r.env.sfw.runRefine({manual:true}),false);
+    assert.equal(r.requests,0);
+});
+
+test('SFW streaming collection waits for the completed reply', () => {
+    const text='Partial reply.'+stateTag(sfwReport);
+    const r=setup({chat:[msg(text)]});
+    r.env.sfw.beginSceneGeneration('normal',true);
+    r.env.sfw.handleIncomingMessage(0);
+    assert.equal(r.context.chat[0].mes,text);
+    assert.equal(r.context.chat[0].extra,undefined);
+    r.env.sfw.finishReceivedGeneration();r.env.sfw.handleIncomingMessage(0);
+    assert.ok(r.context.chat[0].extra.ttottoSfw);
+});
+
+test('SFW cleanup leaves collection inert', () => {
+    const r=setup({chat:[msg('Reply.'+stateTag(sfwReport))]});
+    r.env.sfw.onClean();r.env.sfw.handleIncomingMessage(0);
+    assert.equal(r.context.extensionSettings['ttotto-sfw'],undefined);
+});
+
+
+test('changed SFW snapshots do not feed the repetition history',()=>{
+    const r=setup({chat:[msg('Morning discussion.'+stateTag(sfwReport))]});
+    r.env.sfw.handleIncomingMessage(0);
+    assert.equal(r.env.sfw.recentActs(5).length,1);
+    r.context.chat[0].mes+=' A substantive correction.';
+    assert.equal(r.env.sfw.recentActs(5).length,0);
+});
+
+test('manual SFW repair cannot analyze streaming or placeholder replies',async()=>{
+    const r=setup({chat:[msg('Partial reply.')]});
+    r.env.sfw.beginSceneGeneration('normal',true);
+    assert.equal(await r.env.sfw.runRefine({manual:true}),false);
+    r.env.sfw.finishReceivedGeneration();r.context.chat[0].mes='...';
+    assert.equal(await r.env.sfw.runRefine({manual:true}),false);
+    assert.equal(r.requests,0);
 });

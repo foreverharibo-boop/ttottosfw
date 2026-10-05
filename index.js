@@ -160,7 +160,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.40';
+const EXTENSION_VERSION = '0.2.41';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1612,13 +1612,25 @@ function legacyMessageStateSignature(message) {
     return `${swipeIndex}:${text.length}:${messageTextHash(text)}`;
 }
 
-function stateRecordBody(text) {
-    // Strip machine blocks before normalizing their leftover whitespace. Cutting
-    // an appended translation must not leave a different trailing newline.
-    const clean = stripDetectorTags(String(text ?? '').replace(/```(?:json)?\s*<scene_state\b[^>]*>[\s\S]*?<\/scene_state>\s*```/gi, ''));
+// Compare narrative bodies independently of either extension's machine report.
+// Keep substantive edits significant; normalize only known report wrappers,
+// line endings, trailing spaces, and the established appended-translation marker.
+function canonicalSceneBody(text) {
+    const clean = String(text ?? '')
+        .replace(/(<\/(?:scene_state|sfw_scene)>[ \t]*(?:\r?\n[ \t]*```)?)[ \t\r\n]+(?:no\s+changes?|unchanged)[ \t]*[.!]?[ \t]*$/i, '$1')
+        .replace(/```(?:json)?\s*<(scene_state|sfw_scene)\b[^>]*>[\s\S]*?<\/\1>\s*```/gi, '')
+        .replace(/<(scene_state|sfw_scene)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+        .replace(/```(?:json)?\s*<(?:scene_state|sfw_scene)\b[^>]*>[\s\S]*$/gi, '')
+        .replace(/<(?:scene_state|sfw_scene)\b[^>]*>[\s\S]*$/gi, '')
+        .replace(/<\/(?:scene_state|sfw_scene)>\s*```/gi, '')
+        .replace(/<\/(?:scene_state|sfw_scene)>/gi, '');
     const marker = clean.search(/\r?\n\s*번역문\s*\r?\n/i);
     return (marker >= 0 ? clean.slice(0, marker) : clean)
         .replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trimEnd();
+}
+
+function stateRecordBody(text) {
+    return canonicalSceneBody(text);
 }
 
 function messageStateSignature(message) {
@@ -1820,7 +1832,7 @@ function recentActs(windowSize) {
     const rows = [];
     for (let i = 0; i < messages.length; i++) {
         const snapshot = snapshotForMessage(messages[i]);
-        if (!snapshot?.state?.acts?.length) continue;
+        if (!snapshot?.state?.acts?.length || !snapshotMatchesMessage(messages[i], snapshot)) continue;
         const acts = snapshot.state.acts.filter((act) => !isActIgnored(act, ignored));
         if (acts.length) rows.push({ turnsAgo: messages.length - i, acts });
     }
@@ -1853,7 +1865,7 @@ function recentDialogueBeats(windowSize = Number(getSettings().dialogueWindow) |
     const rows = [];
     for (const message of messages) {
         const snapshot = snapshotForMessage(message);
-        if (!snapshot?.state?.dialogueBeats?.length) continue;
+        if (!snapshot?.state?.dialogueBeats?.length || !snapshotMatchesMessage(message, snapshot)) continue;
         const beats = snapshot.state.dialogueBeats.filter((beat) => !isDialogueBeatIgnored(beat, ignored));
         if (beats.length) rows.push({ beats });
     }
@@ -2496,6 +2508,7 @@ globalThis.ttottoSfwGenerationInterceptor = async function ttottoSfwGenerationIn
 
 function prepareSceneInjection({ consumeBridge = true, generationType } = {}) {
     clearInjectedPrompt();
+    if (!runtimeActive) return;
     try {
         beginSceneGeneration(generationType);
         const settings = getSettings();
@@ -2719,6 +2732,7 @@ function latestAssistantTarget() {
         const swipeIndex = currentSwipeIndex(message);
         return {
             index,
+            metadata: getContext().chatMetadata,
             message,
             swipeIndex,
             signature: `${index}:${swipeIndex}:${String(message.mes ?? '').length}:${messageTextHash(message.mes)}`,
@@ -2730,7 +2744,9 @@ function latestAssistantTarget() {
 
 async function runRefine({ manual = false } = {}) {
     const settings = getSettings();
-    if (!runtimeActive || refineRunning) return false;
+    if (!runtimeActive || !settings.enabled || !getChatMeta(false)?.enabled || refineRunning) return false;
+    if (!manual && !settings.autoRefine) return false;
+    if (generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type)) || holdsRewriteGeneration()) return false;
     if (syncNsfwSuspension()) {
         if (manual) toastr.info('NSFW 장면을 다른 확장에 인계한 동안에는 SFW 보정을 쉬어요.', '🫧또또SFW');
         return false;
@@ -2741,7 +2757,7 @@ async function runRefine({ manual = false } = {}) {
     }
 
     const target = latestAssistantTarget();
-    if (!target) return false;
+    if (!target || isPendingAssistant(target.message)) return false;
     clearTimeout(refineTimer);
     refineTimer = null;
     queuedRefineTarget = null;
@@ -2817,7 +2833,7 @@ async function runRefine({ manual = false } = {}) {
 }
 
 function sameRefineTarget(left, right) {
-    return Boolean(left && right && left.message === right.message
+    return Boolean(left && right && left.metadata === right.metadata && left.message === right.message
         && left.swipeIndex === right.swipeIndex
         && left.contentSignature === right.contentSignature);
 }
@@ -2951,6 +2967,7 @@ function persistChat() {
 }
 
 function handleIncomingMessage(index) {
+    if (!runtimeActive) return;
     const settings = getSettings();
     if (!settings.enabled) { diagnosticRecord('collection_skipped', { reason: 'extension_disabled' }); return; }
     const meta = getChatMeta(false);
@@ -2965,8 +2982,8 @@ function handleIncomingMessage(index) {
         return;
     }
 
-    if (isPendingAssistant(message) || holdsRewriteGeneration()) {
-        diagnosticRecord('collection_skipped', { reason: isPendingAssistant(message) ? 'pending_reply' : 'rewrite_hold', message: entry.index });
+    if (isPendingAssistant(message) || holdsRewriteGeneration() || generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) {
+        diagnosticRecord('collection_skipped', { reason: isPendingAssistant(message) ? 'pending_reply' : holdsRewriteGeneration() ? 'rewrite_hold' : 'generation_in_progress', message: entry.index });
         syncNsfwSuspension();
         updateUi();
         return;
@@ -4226,6 +4243,7 @@ export function onDisable() {
 }
 
 export function onClean() {
+    onDisable();
     stopDiagnosticFetch();
     clearDiagnostics();
     stopStateTagDisplayGuard();
