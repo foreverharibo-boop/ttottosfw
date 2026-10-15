@@ -200,7 +200,8 @@ for (const loadOrder of ['sfw-first', 'nsfw-first']) {
         r.env.sfw.prepareSceneInjection({ generationType: 'normal' });
         r.env.nsfw.prepareSceneInjection({ generationType: 'normal' });
         assert.ok(r.prompts.ttotto_sfw_continuity.includes('[Scene Continuity'));
-        assert.ok(r.prompts.ttotto_nsfw_continuity.includes('[Scene Monitor]'));
+        assert.equal(r.prompts.ttotto_nsfw_continuity, '');
+        assert.match(r.prompts.ttotto_sfw_continuity, /\"heat\":0/);
         assert.ok(!r.prompts.ttotto_nsfw_continuity.includes('[Scene Continuity'));
         r.unchanged();
     });

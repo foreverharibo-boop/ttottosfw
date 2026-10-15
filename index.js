@@ -1,3 +1,247 @@
+// BEGIN slow-burn-turns.js
+// Logical reply slots, not request counts. No message or body writes.
+// A regenerated reply retains its preceding user turn even when ST replaces
+// the assistant object, timestamps and swipe metadata.
+function fingerprint(value) {
+    let a = 2166136261, b = 2246822507;
+    for (let i = 0; i < value.length; i++) {
+        const code = value.charCodeAt(i);
+        a = Math.imul(a ^ code, 16777619);
+        b = Math.imul(b ^ code, 3266489909);
+    }
+    return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0');
+}
+
+function replySlots(chat, isPending = () => false) {
+    const slots = [], occurrences = new Map();
+    let anchor = 'root', position = 0, assistantIndex = 0;
+    for (const message of Array.isArray(chat) ? chat : []) {
+        if (!message || message.is_system) continue;
+        if (message.is_user) {
+            const date = message.send_date;
+            // Native user timestamps survive edits, reloads and branch copies.
+            // Imported messages without dates use a deterministic fallback.
+            const value = date !== undefined && date !== null && date !== ''
+                ? 'date:' + String(date) : 'text:' + String(message.mes ?? '');
+            const id = fingerprint(value), occurrence = occurrences.get(id) ?? 0;
+            occurrences.set(id, occurrence + 1);
+            anchor = `${id}:${occurrence}`; position = 0;
+            continue;
+        }
+        const key = `${anchor}:${position++}`;
+        const complete = !isPending(message) && Boolean(String(message.mes ?? '').trim())
+            && (!message.gen_started || Boolean(message.gen_finished));
+        slots.push({ key, message, complete, assistantIndex: assistantIndex++ });
+    }
+    return slots;
+}
+
+function beginTurnSession(chat, isPending) {
+    return { version: 1, baseline: replySlots(chat, isPending).filter(slot => slot.complete).map(slot => slot.key).join('\n') };
+}
+
+function sessionTurns(meta, chat, isPending) {
+    if (!meta?.slowBurnSessionActive) return { messages: [], baselineTurns: 0, legacyRebased: false, changed: false };
+    const slots = replySlots(chat, isPending);
+    let session = meta.slowBurnTurnSession, changed = false;
+    if (session?.version !== 1 || typeof session.baseline !== 'string') {
+        const old = meta.slowBurnSessionStartAssistantCount;
+        const valid = Number.isInteger(old) && old >= 0;
+        const boundary = valid ? Math.min(old, slots.length) : slots.length;
+        session = { version: 1, baseline: slots.filter(slot => slot.complete && slot.assistantIndex < boundary).map(slot => slot.key).join('\n'),
+            legacyRebased: !valid || old > slots.length };
+        meta.slowBurnTurnSession = session;
+        changed = true;
+    }
+    const baseline = new Set(session.baseline ? session.baseline.split('\n') : []);
+    return { messages: slots.filter(slot => slot.complete && !baseline.has(slot.key)).map(slot => slot.message),
+        baselineTurns: baseline.size, legacyRebased: !!session.legacyRebased, changed };
+}
+
+// END slow-burn-turns.js
+
+// BEGIN scene-body.js
+// Kept only to validate and migrate a pre-0.2.15 snapshot against its own body.
+function stripLegacyAuxiliarySceneReports(text) {
+    return String(text ?? '').replace(
+        /\s*<\s*charm[-_]?now\s*>(?:(?!<\s*charm[-_]?now\s*>)[\s\S])*?<\s*\/\s*charm[-_]?now\s*>\s*/gi,
+        '\n',
+    ).trimEnd();
+}
+
+const VOID_TAGS = new Set('area base br col embed hr img input link meta param source track wbr'.split(' '));
+
+// Comparison only. Never write this result into a message or an analysis prompt.
+// All tag names are eligible, including unknown extension protocols and HTML.
+function stripAuxiliarySceneReports(text) {
+    const source = String(text ?? '');
+    const tokens = /<!--[\s\S]*?(?:-->|$)|<\s*(\/?)\s*([\p{L}_][\p{L}\p{N}_.:-]*)(?=[\s/>])(?:"[^"]*"|'[^']*'|[^'"<>])*?>/gu;
+    const stack = [], outside = [];
+    let cursor = 0;
+    for (const token of source.matchAll(tokens)) {
+        if (!stack.length) outside.push(source.slice(cursor, token.index));
+        cursor = token.index + token[0].length;
+        if (!token[2]) continue; // Comments carry no narrative for comparison.
+        const name = token[2].toLowerCase();
+        if (token[1]) {
+            const open = stack.lastIndexOf(name);
+            if (open >= 0) stack.length = open;
+        } else if (!/\/\s*>$/.test(token[0]) && !VOID_TAGS.has(name)) {
+            stack.push(name);
+        }
+    }
+    // An unclosed opening tag owns the remainder, just like our report tags.
+    if (!stack.length) outside.push(source.slice(cursor));
+    // Tag cleanup often also removes its surrounding empty lines/indentation.
+    return outside.join('').replace(/\s+/g, ' ').trim();
+}
+
+// END scene-body.js
+
+// BEGIN body-tokens.js
+// Recount only messages whose owned scene reports were removed in this session.
+// No generation, translation, full-message rendering, or provider usage changes.
+function createBodyTokenCounter({ raw, ready, allowed, epoch, swipe, save, record = () => {} }) {
+    let tracked = new WeakSet(), jobs = new WeakMap(), revision = 0;
+    const chatId = context => context.getCurrentChatId?.() ?? context.chatId;
+    const enabled = context => context.powerUserSettings?.message_token_count_enabled !== false;
+    function valid(job) {
+        const context = raw();
+        return ready() && allowed() && enabled(context) && revision === job.revision
+            && epoch() === job.epoch && context.chat === job.chat && context.chatMetadata === job.metadata
+            && chatId(context) === job.chatId && context.chat[job.index] === job.message
+            && swipe(job.message) === job.swipe && job.message.mes === job.text
+            && job.message.extra === job.extra && jobs.get(job.message) === job;
+    }
+    function apply(job) {
+        if (!valid(job)) return;
+        const message = job.message;
+        let changed = message.extra.token_count !== job.count;
+        if (changed) message.extra.token_count = job.count;
+        // Never update another swipe or replace its other metadata.
+        const info = message.swipe_info?.[job.swipe];
+        if (info && message.swipes?.[job.swipe] === job.text) {
+            info.extra ??= {};
+            if (info.extra.token_count !== job.count) { changed = true; info.extra.token_count = job.count; }
+        }
+        // Change the counter alone: rerendering the reply can disturb translation UI.
+        const element = globalThis.document?.querySelector?.(`#chat .mes[mesid="${job.index}"]`);
+        const displayedSwipe = element?.getAttribute('swipeid');
+        if (element && (displayedSwipe == null || displayedSwipe === String(job.swipe))) {
+            for (const counter of element.querySelectorAll('.tokenCounterDisplay')) {
+                const label = `${job.count}t`;
+                if (counter.textContent !== label) counter.textContent = label;
+            }
+        }
+        if (changed) {
+            record('body_token_count_updated', { message: job.index, swipe: job.swipe, bodyChars: job.text.length, tokens: job.count });
+            save();
+        }
+    }
+    function refresh(message) {
+        if (!message || !tracked.has(message) || !ready() || !allowed()) return;
+        const context = raw();
+        if (!enabled(context) || typeof context.getTokenCountAsync !== 'function' || !message.extra) return;
+        const index = context.chat.indexOf(message);
+        if (index < 0 || typeof message.mes !== 'string') return;
+        const previous = jobs.get(message);
+        if (previous && valid(previous)) {
+            if (previous.count !== undefined) apply(previous);
+            return;
+        }
+        const job = { message, text: message.mes, swipe: swipe(message), extra: message.extra,
+            index, chat: context.chat, metadata: context.chatMetadata, chatId: chatId(context),
+            epoch: epoch(), revision };
+        jobs.set(message, job);
+        Promise.resolve().then(() => {
+            if (!valid(job)) return undefined;
+            return context.getTokenCountAsync(job.text, 0);
+        }).then(count => {
+            if (!valid(job)) return;
+            if (!Number.isSafeInteger(count) || count < 0) throw new Error('Invalid token count');
+            job.count = count;
+            apply(job);
+        }).catch(() => {
+            if (jobs.get(message) !== job) return;
+            const current = valid(job);
+            jobs.delete(message);
+            // Keep the old count on failure; omit response text and exception contents.
+            if (current) record('body_token_count_failed', { message: job.index, swipe: job.swipe });
+        });
+    }
+    return {
+        cleaned(message) { tracked.add(message); refresh(message); },
+        refresh,
+        reset() { revision++; tracked = new WeakSet(); jobs = new WeakMap(); },
+    };
+}
+
+// END body-tokens.js
+
+// BEGIN compact-report.js
+// One wire record; the existing stores/UI remain backward compatible.
+// Machine keys stay stable. Only descriptive values are Korean, not the RP prose.
+function expandCompactReport(raw, kind) {
+    if (raw?._v !== 2) return raw;
+    const scene = raw.scene;
+    if (!scene || typeof scene !== 'object' || Array.isArray(scene)) return null;
+    if (kind === 'sfw') return scene;
+    const characters = Object.fromEntries(Object.entries(scene.characters ?? {}).filter(([, v]) => v && typeof v === 'object').map(([name, info]) => [name, {
+        clothing: info.appearance, position: info.position, contact: info.contact,
+    }]));
+    return { location: scene.location, characters, acts: scene.acts,
+        dialogue_beats: scene.dialogue_beats, next: scene.next, heat: raw.heat, stage: raw.stage, scene };
+}
+
+function readCompactReport(text, parse = JSON.parse) {
+    const matches = [...String(text ?? '').matchAll(/<(sfw_scene|scene_state)\b[^>]*>([\s\S]*?)<\/\1>/gi)];
+    // Never revive an earlier report behind a malformed newer compact report.
+    for (let i = matches.length - 1; i >= 0; i--) {
+        try {
+            const raw = parse(matches[i][2].trim());
+            if (raw?._v === 2) return raw;
+        } catch { return null; }
+    }
+    return null;
+}
+
+function compactReportLines(kind, options, { repair = false, heatRules = [], stageRules = [], nextGuidance = '' } = {}) {
+    const sfw = options.sfw ?? {}, nsfw = options.nsfw ?? {};
+    const active = kind === 'nsfw' ? nsfw : sfw;
+    const heat = kind === 'nsfw' || options.monitor;
+    const contact = heat; // Preserve contact when a general reply transitions into intimacy.
+    const person = { appearance: '', position: '', holding: '', condition: '', ...(contact ? { contact: '' } : {}) };
+    const scene = { location: '', time: '', environment: '', important_objects: {}, characters: { name: person }, scene_type: 'general', intensity: 0 };
+    if ((kind === 'sfw' || options.sfwEnabled) && sfw.slowBurnEnabled) scene.stage = 1;
+    if (kind === 'nsfw' || active.repeatGuard || (options.sfwEnabled && sfw.repeatGuard)) scene.acts = [];
+    if (active.dialogueBeatGuard || (options.sfwEnabled && sfw.dialogueBeatGuard)) scene.dialogue_beats = [];
+    if (sfw.dialogueFlow) scene.dialogue_flow = { topic: '', last_question: '', new_facts: [] };
+    if (active.nextBeatHints || (options.sfwEnabled && sfw.nextBeatHints)) scene.next = [];
+    const record = { _v: 2, scene, ...(heat ? { heat: 0 } : {}) };
+    if (kind === 'nsfw' && nsfw.slowBurnEnabled) record.stage = 1;
+    const tag = kind === 'nsfw' ? 'scene_state' : 'sfw_scene';
+    return [
+        repair ? 'Read the RP log and return ONLY one JSON object matching this schema:'
+            : 'STATE REPORT: End your response with exactly one state block (single-line JSON, hidden from the reader). No other scene report:',
+        repair ? JSON.stringify(record) : `<${tag}>${JSON.stringify(record)}</${tag}>`,
+        'Write descriptive values concisely in Korean only; keep JSON keys, enum values and character names unchanged. Do not add English translations. This language rule applies ONLY to the record, not the story.',
+        'Record facts at the END of the reply. Include every present character and relevant object, including unchanged facts. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
+        'Use RP time only, never the real date/clock. Preserve explicit in-story date/time (including Info_panel); otherwise keep established time context without inventing a clock time.',
+        'scene_type: general/daily/conversation/romance/conflict/action/investigation; keep it unless the dominant scene changes. intensity: narrative tension 0-10, not sexual heat.',
+        ...(scene.stage !== undefined ? ['scene.stage: observed narrative progression 1 setup, 2 engagement, 3 first development, 4 deepening, 5 decisive turn, 6 resolution; not sexual stage or permission to finish.'] : []),
+        ...(scene.acts ? ['acts: up to 4 substantive NEW beats from this reply, not routine logistics.'] : []),
+        ...(scene.dialogue_beats ? ['dialogue_beats: up to 3 conversational intents, not quotations; [] if no dialogue.'] : []),
+        ...(scene.dialogue_flow ? ['dialogue_flow: current topic, latest unanswered CHARACTER question (empty if answered/superseded), up to 3 newly established facts; no unrelated unresolved plots.'] : []),
+        ...(scene.next ? ['next: 2-3 plausible future beats, not facts or repetitions of acts/new_facts; obey the current scene, user intent, bans and active pacing.'] : []),
+        ...(heat ? heatRules : []),
+        ...(record.stage !== undefined ? stageRules : []),
+        ...(nextGuidance ? [nextGuidance] : []),
+        'Example numbers are placeholders. Report actual observations, never copy the examples or repeat common facts outside scene.',
+    ];
+}
+
+// END compact-report.js
+
 // BEGIN LOCAL SCENE DETECTOR
 const scoreScene = (() => {
 // NSFW 로컬 감지기. API나 프롬프트를 호출하지 않는다.
@@ -160,7 +404,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.44';
+const EXTENSION_VERSION = '0.2.45';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -793,6 +1037,7 @@ function diagnosticRecord(stage, data = {}, chat = diagnosticScope()) {
     renderDiagnostics();
 }
 function diagnosticState() {
+    const progress = slowBurnProgress();
     const stageInfo = slowBurnStageInfo();
     const current = effectiveState();
     const settings = getContext().extensionSettings?.[MODULE_NAME] ?? {};
@@ -803,6 +1048,10 @@ function diagnosticState() {
         latestReportMissing: current.source === 'missing-report', latestBodyChanged: current.source === 'body-changed',
         suspended: Boolean(meta.nsfwSuspended), resumePending: Boolean(meta.nsfwResumePending),
         nsfwAutoArmed: Boolean(nsfw.autoArmed), nsfwArmedByHeat: nsfw.armSource === 'heat', nsfwArmedLocally: nsfw.armSource === 'local', nsfwForceArmed: Boolean(nsfw.forceArmed), nsfwBridge: Boolean(nsfw.bridgePending),
+        slowBurnCountedTurns: progress.sessionTurns, slowBurnStageTurns: progress.turns,
+        slowBurnRequiredTurns: progress.requiredTurns, slowBurnBaselineTurns: progress.baselineTurns,
+        slowBurnLegacyRebased: progress.legacyRebased,
+        slowBurnSessionRemaining: progress.sessionRemaining, slowBurnStageRemaining: progress.stageRemaining,
         refineRunning, pendingGenerations: generationEvents.length };
 }
 function diagnosticReport() {
@@ -1385,6 +1634,7 @@ function beginSceneGeneration(type, fromEvent = false, dryRun = false) {
     const normalized = normalizeGenerationType(type);
     if (fromEvent) generationEvents.push(normalized);
     if (!ALLOWED_GENERATION_TYPES.has(normalized)) return;
+    interruptSceneRefine();
     // SFW의 생성 훅이 먼저 실행되어도 NSFW가 해제 판정을 하기 전에 담당을 보존한다.
     globalThis.ttottoNsfwSceneBridge?.beginGeneration?.(normalized);
     if (normalized !== 'swipe' && normalized !== 'regenerate') {
@@ -1458,9 +1708,10 @@ function resumeSfwFromLatest() {
     // Never promote an old NSFW heat-only report to a current SFW scene.
     meta.manualState = null;
     const snapshot = latestCurrentSfwSnapshot();
-    const current = parseStateFromText(assistantMessages().at(-1)?.mes) ?? snapshot?.state;
-    meta.nsfwResumePending = !current || stateCompletenessIssues(current).length > 0;
-    saveChatMeta();
+    const compact = sharedCompactReport(assistantMessages().at(-1));
+    const current = (compact ? sanitizeState(compact) : null) ?? parseStateFromText(assistantMessages().at(-1)?.mes) ?? snapshot?.state;
+    const pending = !current || stateCompletenessIssues(current).length > 0;
+    if (meta.nsfwResumePending !== pending) { meta.nsfwResumePending = pending; saveChatMeta(); }
     if (meta.nsfwResumePending) scheduleAutoRefine();
 }
 
@@ -1579,6 +1830,7 @@ function sanitizeBiArray(value, limit = 8) {
 }
 
 function sanitizeState(raw) {
+    raw = expandCompactReport(raw, 'sfw');
     if (!raw || typeof raw !== 'object') return null;
     const clean = {
         location: { en: '', ko: '' },
@@ -1704,6 +1956,8 @@ function parseStateJson(text) {
 }
 
 function parseStateFromText(text) {
+    const compact = readCompactReport(text, parseStateJson);
+    if (compact) return sanitizeState(compact);
     const source = String(text ?? '');
     let lastJson = null;
     for (const match of source.matchAll(STATE_TAG_REGEX)) lastJson = match[1];
@@ -1765,7 +2019,7 @@ function legacyMessageStateSignature(message) {
 // Compare narrative bodies independently of either extension's machine report.
 // Keep substantive edits significant; normalize only known report wrappers,
 // line endings, trailing spaces, and the established appended-translation marker.
-function canonicalSceneBody(text) {
+function previousCanonicalSceneBody(text) {
     const clean = String(text ?? '')
         .replace(/(<\/(?:scene_state|sfw_scene)>[ \t]*(?:\r?\n[ \t]*```)?)[ \t\r\n]+(?:no\s+changes?|unchanged)[ \t]*[.!]?[ \t]*$/i, '$1')
         .replace(/```(?:json)?\s*<(scene_state|sfw_scene)\b[^>]*>[\s\S]*?<\/\1>\s*```/gi, '')
@@ -1779,6 +2033,16 @@ function canonicalSceneBody(text) {
         .replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trimEnd();
 }
 
+function canonicalSceneBody(text) {
+    return stripAuxiliarySceneReports(previousCanonicalSceneBody(text));
+}
+function previousMessageStateSignature(message) {
+    const text = previousCanonicalSceneBody(message?.mes);
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+    return `${currentSwipeIndex(message)}:${text.length}:${(hash >>> 0).toString(36)}`;
+}
+
 function stateRecordBody(text) {
     return canonicalSceneBody(text);
 }
@@ -1790,8 +2054,15 @@ function messageStateSignature(message) {
 
 function snapshotMatchesMessage(message, snapshot = snapshotForMessage(message)) {
     if (!snapshot?.state) return false;
-    return snapshot.messageSignature === messageStateSignature(message)
-        || (snapshot.signatureVersion !== 2 && snapshot.messageSignature === legacyMessageStateSignature(message));
+    const signature = messageStateSignature(message);
+    if (snapshot.messageSignature === signature) return true;
+    const previousMatches = snapshot.signatureVersion === 2 && snapshot.messageSignature === previousMessageStateSignature(message);
+    const legacyMatches = snapshot.signatureVersion !== 2 && snapshot.signatureVersion !== 3
+        && snapshot.messageSignature === legacyMessageStateSignature(message);
+    if (!previousMatches && !legacyMatches) return false;
+    snapshot.messageSignature = signature;
+    snapshot.signatureVersion = 3;
+    return true;
 }
 
 function diagnosticCache(message) {
@@ -1821,14 +2092,16 @@ function harvestMessage(message) {
     let changed = false;
     let found = false;
 
-    const state = parseStateFromText(message.mes);
-    const strippedMes = stripStateTag(message.mes);
+    const compact = sharedCompactReport(message);
+    const state = compact ? takeCompactState(message, compact) : parseStateFromText(message.mes);
+    const clean = text => compact ? stripStateTag(String(text ?? '').replace(/<scene_state\b[^>]*>[\s\S]*?<\/scene_state>/gi, '')) : stripStateTag(text);
+    const strippedMes = clean(message.mes);
     if (strippedMes !== message.mes) {
         diagnosticWriteBody(message, strippedMes);
         changed = true;
     }
     if (Array.isArray(message.swipes) && typeof message.swipes[swipeIndex] === 'string') {
-        const strippedSwipe = stripStateTag(message.swipes[swipeIndex]);
+        const strippedSwipe = clean(message.swipes[swipeIndex]);
         if (strippedSwipe !== message.swipes[swipeIndex]) {
             message.swipes[swipeIndex] = strippedSwipe;
             changed = true;
@@ -1840,12 +2113,14 @@ function harvestMessage(message) {
         const panelTime = infoPanelField(message.mes, 'Date', '날짜');
         if (panelTime) state.time = toBi(panelTime);
         const store = getMessageStore(message);
-        store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature, signatureVersion: 2 };
+        store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature, signatureVersion: 3 };
         found = true;
     } else {
         const snapshot = snapshotForMessage(message);
         found = snapshotMatchesMessage(message, snapshot);
     }
+    if (changed) bodyTokenCounter.cleaned(message);
+    bodyTokenCounter.refresh(message);
     return { changed, found, state };
 }
 
@@ -2259,6 +2534,7 @@ function resetSlowBurnSession(meta = getChatMeta(false)) {
     if (!meta) return;
     meta.slowBurnSessionActive = false;
     meta.slowBurnSessionStartAssistantCount = null;
+    meta.slowBurnTurnSession = null;
     meta.slowBurnRecoveryPending = false;
     meta.slowBurnTargetActive = false;
 }
@@ -2269,16 +2545,14 @@ function startSlowBurnSessionIfNeeded() {
     if (!settings.slowBurnEnabled || !meta || !isFullyArmed() || meta.slowBurnSessionActive) return false;
     meta.slowBurnSessionActive = true;
     meta.slowBurnSessionStartAssistantCount = assistantMessages().length;
+    meta.slowBurnTurnSession = beginTurnSession(getContext().chat, isPendingAssistant);
     meta.slowBurnRecoveryPending = false;
     saveChatMeta();
     return true;
 }
 
 function slowBurnSessionStartCount() {
-    const meta = getChatMeta(false);
-    const count = Number(meta?.slowBurnSessionStartAssistantCount);
-    if (meta?.slowBurnSessionActive && Number.isInteger(count) && count >= 0) return count;
-    return assistantMessages().length;
+    return Math.max(0, assistantMessages().length - slowBurnTurnProgress().messages.length);
 }
 
 function slowBurnTargetProgress() {
@@ -2287,7 +2561,7 @@ function slowBurnTargetProgress() {
     const target = sanitizeSlowBurnTarget(meta?.slowBurnTarget);
     const requiredTurns = clampSlowBurnTargetTurns(meta?.slowBurnTargetTurns);
     const completedTurns = meta?.slowBurnSessionActive
-        ? Math.max(0, assistantMessages().length - slowBurnSessionStartCount())
+        ? slowBurnTurnProgress().messages.length
         : 0;
     const active = Boolean(developerMode && meta?.slowBurnTargetActive && target && meta?.slowBurnSessionActive);
     return {
@@ -2300,10 +2574,9 @@ function slowBurnTargetProgress() {
     };
 }
 
-function consecutiveSlowBurnTurns(stage, startCount = slowBurnSessionStartCount()) {
+function consecutiveSlowBurnTurns(stage, messages = slowBurnTurnProgress().messages) {
     let turns = 0;
     const currentSceneType = effectiveState().state?.sceneType || 'general';
-    const messages = assistantMessages().slice(Math.max(0, startCount));
     for (let i = messages.length - 1; i >= 0; i--) {
         const snapshot = snapshotForMessage(messages[i]);
         if (!snapshot?.state || !snapshotMatchesMessage(messages[i], snapshot)) break;
@@ -2317,9 +2590,9 @@ function consecutiveSlowBurnTurns(stage, startCount = slowBurnSessionStartCount(
 function slowBurnProgress(settings = getSettings()) {
     const { stage, source } = slowBurnStageInfo();
     const requiredTurns = SLOW_BURN_MIN_TURNS[settings.slowBurnIntensity] ?? SLOW_BURN_MIN_TURNS.slow;
-    const startCount = slowBurnSessionStartCount();
-    const sessionTurns = Math.max(0, assistantMessages().length - startCount);
-    const turns = consecutiveSlowBurnTurns(stage, startCount);
+    const counter = slowBurnTurnProgress();
+    const sessionTurns = counter.messages.length;
+    const turns = consecutiveSlowBurnTurns(stage, counter.messages);
     const meta = getChatMeta(false);
     const locked = Boolean(meta?.slowBurnLocked);
     const sessionRemaining = Math.max(0, requiredTurns - sessionTurns);
@@ -2333,6 +2606,8 @@ function slowBurnProgress(settings = getSettings()) {
         source,
         turns,
         sessionTurns,
+        baselineTurns: counter.baselineTurns,
+        legacyRebased: counter.legacyRebased,
         requiredTurns,
         sessionRemaining,
         stageRemaining,
@@ -2390,6 +2665,10 @@ function buildSlowBurnLines(settings) {
         `SESSION COUNT: ${progress.sessionTurns}/${progress.requiredTurns} responses since activation. Stage residence is unconfirmed.`,
         'Return the stage actually reached at the END of this response in the hidden report (integer 1-6), using the scale for this mode. Do not copy a fallback stage.',
     ];
+    if (progress.canConclude) return [
+        '[SLOW-BURN — COMPLETION PERMITTED]',
+        'The final-stage and minimum-response requirements are satisfied, and no stage lock is active. Allow the scene to conclude naturally or transition to what follows when it fits the conversation. Do not prolong it merely to satisfy slow burn or restart earlier beats. This is permission, not a requirement to end immediately.',
+    ];
     const state = effectiveState().state;
     const sceneType = state?.sceneType || 'general';
     const definition = sceneTypeDef(sceneType);
@@ -2433,30 +2712,30 @@ function buildSlowBurnLines(settings) {
     return lines;
 }
 
-function stateReportLines(settings, nextGuidance = '') {
+function legacyStateReportLines(settings, nextGuidance = '') {
     const fields = [
         '"_status":"updated"',
         '"scene_type":"general"',
-        '"location":"short English phrase || 짧은 한국어 구"',
-        '"time":"current time or time context, English || 한국어"',
-        '"environment":"scene-relevant environmental state, English || 한국어"',
-        '"important_objects":{"object name":"current location/condition, English || 한국어"}',
-        '"characters":{"이름":{"appearance":"current appearance/clothing, English || 한국어","position":"current posture/position, English || 한국어","holding":"currently holding/carrying, English || 한국어","condition":"current physical condition, English || 한국어"}}',
+        '"location":"Korean only"',
+        '"time":"current time or time context, Korean only"',
+        '"environment":"scene-relevant environmental state, Korean only"',
+        '"important_objects":{"object name":"current location/condition, Korean only"}',
+        '"characters":{"이름":{"appearance":"current appearance/clothing, Korean only","position":"current posture/position, Korean only","holding":"currently holding/carrying, Korean only","condition":"current physical condition, Korean only"}}',
     ];
     if (settings.dialogueFlow) {
-        fields.push('"dialogue_flow":{"topic":"current conversation topic, English || 한국어","last_question":"most recent direct CHARACTER question still awaiting a response, English || 한국어","new_facts":["0-3 facts newly established in this response, each English || 한국어"]}');
+        fields.push('"dialogue_flow":{"topic":"current conversation topic, Korean only","last_question":"most recent direct CHARACTER question still awaiting a response, Korean only","new_facts":["0-3 facts newly established in this response, each Korean only"]}');
     }
-    if (settings.dialogueBeatGuard) fields.push('"dialogue_beats":["0-3 dialogue intents from spoken lines, each English || 한국어"]');
-    if (settings.repeatGuard) fields.push('"acts":["1-4 significant new beats in this response, each English || 한국어"]');
+    if (settings.dialogueBeatGuard) fields.push('"dialogue_beats":["0-3 dialogue intents from spoken lines, each Korean only"]');
+    if (settings.repeatGuard) fields.push('"acts":["1-4 significant new beats in this response, each Korean only"]');
     fields.push('"intensity":0');
     if (settings.slowBurnEnabled) fields.push('"stage":1');
-    if (settings.nextBeatHints) fields.push('"next":["2-3 fresh beats the scene could move to next, each English || 한국어"]');
+    if (settings.nextBeatHints) fields.push('"next":["2-3 fresh beats the scene could move to next, each Korean only"]');
 
     const lines = [
         'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
         'Keep JSON string values on one line. Escape embedded quotation marks and backslashes using JSON syntax; never put literal line breaks or tabs inside strings.',
         `<sfw_scene>{${fields.join(',')}}</sfw_scene>`,
-        'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
+        'Write descriptive values concisely in Korean only; keep keys and character names unchanged. This applies only to the report, not the story. Use the same character names as in the chat.',
         'If this response includes an Info_panel Date field, copy its full date and clock time into "time"; never replace an explicit clock time with a vague phrase such as late afternoon. Without that field, use the established time context without inventing a clock time.',
         'Classify "scene_type" as exactly one of: general, daily, conversation, romance, conflict, action, investigation. Choose the type that best describes the response ending.',
         'Keep the established "scene_type" when the scene merely contains a few lines of dialogue or a small action. Change it only when the dominant kind of scene genuinely shifts.',
@@ -2488,6 +2767,7 @@ function stateReportLines(settings, nextGuidance = '') {
 // While NSFW owns the narrative, request only a conditional return report.
 // No SFW pacing, bans, state injection, or scene-ending instructions are added.
 function buildHandoffReport() {
+    if (compactPeer()) return '';
     const settings = getSettings();
     const schema = stateReportLines(settings).find(line => line.startsWith('<sfw_scene>'));
     return [
@@ -2497,7 +2777,7 @@ function buildHandoffReport() {
         'Keep the separately requested <scene_state> report. The one-report limit applies once per tag type; on an everyday return include both reports, with <sfw_scene> last.',
         schema,
         'Fill the report from the situation at the END of THIS response. Include every present character, their appearance/clothing, posture, held items and condition, plus scene-relevant important objects and their current locations/conditions. Do not copy old scene states; do not invent absent people or objects.',
-        'Copy the exact Info_panel date/time if present. Each string is concise English || Korean. Use valid single-line JSON. Never replace real values with no_change or unchanged.',
+        'Copy the exact Info_panel date/time if present. Each string is concise Korean only. Use valid single-line JSON. Never replace real values with no_change or unchanged.',
         'intensity means narrative tension (0-10), NOT sexual heat; report the actual value. If stage is included, report the current progression of the returned scene type (1-6). acts describes new substantive beats; next describes fresh future possibilities. Empty objects are allowed only when no relevant objects are established.',
     ].join('\n');
 }
@@ -2594,7 +2874,7 @@ function buildInjection() {
                 `SUGGESTED NEXT BEATS (pick one, or do something even better — never fall back to a banned beat): ${beats.map((beat) => biText(beat, 'en')).join(' / ')}`,
                 'Choose by considering the current topic, any still-unanswered direct question, and the newly established facts together. Use the candidate that follows most naturally from that context, or create a better continuation. A candidate is a future possibility, not an established fact: do not simply repeat, summarize, or reenact a newly established fact.',
             );
-            if (settings.slowBurnEnabled) sections.push('These suggestions are subordinate to the mandatory slow-burn stage cap and no-conclusion lock. Ignore any suggestion that would skip, finish, or wind down the scene too early.');
+            if (settings.slowBurnEnabled && !slowBurnProgress(settings).canConclude) sections.push('These suggestions are subordinate to the mandatory slow-burn stage cap and no-conclusion lock. Ignore any suggestion that would skip, finish, or wind down the scene too early.');
         }
     }
 
@@ -2755,7 +3035,7 @@ function buildRefineInput() {
     return rows.join('\n\n');
 }
 
-function refinePromptMessages() {
+function legacyRefinePromptMessages() {
     const settings = getSettings();
     const preferenceText = settings.cardLinkEnabled && settings.nextBeatHints ? cardLinkPreferenceText() : '';
     const preferenceRule = preferenceText
@@ -2763,18 +3043,18 @@ function refinePromptMessages() {
         : '';
     const fields = [
         '"scene_type":"general"',
-        '"location":"short English phrase || 짧은 한국어 구"',
-        '"time":"current time or time context, English || 한국어"',
-        '"environment":"scene-relevant environmental state, English || 한국어"',
-        '"important_objects":{"object name":"current location/condition, English || 한국어"}',
-        '"characters":{"name":{"appearance":"current appearance/clothing, English || 한국어","position":"current posture/position, English || 한국어","holding":"currently holding/carrying, English || 한국어","condition":"current physical condition, English || 한국어"}}',
+        '"location":"Korean only"',
+        '"time":"current time or time context, Korean only"',
+        '"environment":"scene-relevant environmental state, Korean only"',
+        '"important_objects":{"object name":"current location/condition, Korean only"}',
+        '"characters":{"name":{"appearance":"current appearance/clothing, Korean only","position":"current posture/position, Korean only","holding":"currently holding/carrying, Korean only","condition":"current physical condition, Korean only"}}',
     ];
-    if (settings.dialogueFlow) fields.push('"dialogue_flow":{"topic":"current topic, English || 한국어","last_question":"latest unanswered direct CHARACTER question, English || 한국어","new_facts":["0-3 newly established facts, each English || 한국어"]}');
-    if (settings.dialogueBeatGuard) fields.push('"dialogue_beats":["0-3 dialogue intents from the final CHARACTER message, each English || 한국어"]');
-    if (settings.repeatGuard) fields.push('"acts":["1-4 significant beats from the final CHARACTER message only, each English || 한국어"]');
+    if (settings.dialogueFlow) fields.push('"dialogue_flow":{"topic":"current topic, Korean only","last_question":"latest unanswered direct CHARACTER question, Korean only","new_facts":["0-3 newly established facts, each Korean only"]}');
+    if (settings.dialogueBeatGuard) fields.push('"dialogue_beats":["0-3 dialogue intents from the final CHARACTER message, each Korean only"]');
+    if (settings.repeatGuard) fields.push('"acts":["1-4 significant beats from the final CHARACTER message only, each Korean only"]');
     fields.push('"intensity":0');
     if (settings.slowBurnEnabled) fields.push('"stage":1');
-    if (settings.nextBeatHints) fields.push('"next":["2-3 fresh beats the scene could move to next, each English || 한국어"]');
+    if (settings.nextBeatHints) fields.push('"next":["2-3 fresh beats the scene could move to next, each Korean only"]');
 
     const system = `You are a scene-state tracker for a fiction roleplay log. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.
 
@@ -2783,7 +3063,7 @@ Schema:
 
 Rules:
 - Keep JSON string values on one line. Escape embedded quotation marks and backslashes using JSON syntax; never put literal line breaks or tabs inside strings.
-- Every string value is a bilingual pair: concise English first, then " || ", then natural Korean.
+- Write descriptive values concisely in Korean only. This applies only to the record, not the story.
 - Describe the state at the END of the log, factually and concisely. Include current time context, environment, scene-relevant object states, every present character, and significant physical-condition changes.
 - Classify "scene_type" as exactly one of: general, daily, conversation, romance, conflict, action, investigation.
 - Keep the established scene type unless the dominant kind of scene genuinely changes; incidental dialogue or a small action alone is not a type change.
@@ -2869,6 +3149,7 @@ function parseRefineResponse(text) {
         throw new Error('AI 분석 응답의 JSON 형식이 잘못되었거나 중간에 잘렸어요. 이번 결과는 저장하지 않았어요.');
     }
     const state = sanitizeState(raw);
+    if (state && raw?._v === 2) compactRepairRecords.set(state, raw);
     if (!state) throw new Error('보정 분석 결과가 비어 있습니다.');
     return state;
 }
@@ -2926,12 +3207,15 @@ async function runRefine({ manual = false } = {}) {
 
     lastAutoRefineTarget = target;
     refineFailure = null;
+    const recordUnchanged = captureSceneRecordGuard(target.message);
+    const generationRevision = sceneGenerationRevision;
     const controller = new AbortController();
     refineAbortController = controller;
     updateUi();
 
     try {
         const response = await awaitRefineResponse(controller.signal);
+        if (generationRevision !== sceneGenerationRevision || !recordUnchanged()) { diagnosticRecord('refine_discarded', { reason: 'generation_or_record_changed' }); return false; }
         if (controller.signal.aborted || !runtimeActive || !getSettings().enabled
             || !getChatMeta(false)?.enabled || syncNsfwSuspension()) return false;
         const state = parseRefineResponse(response);
@@ -2960,10 +3244,11 @@ async function runRefine({ manual = false } = {}) {
             state,
             at: refinedAt,
             messageSignature: target.contentSignature,
-            signatureVersion: 2,
+            signatureVersion: 3,
         };
         persistChat();
         meta.manualState = { state, at: refinedAt, source: 'ai-refine', target: currentStateTarget() };
+        publishCompactRepair(compactRepairRecords.get(state), target.message);
         meta.nsfwResumePending = false;
         diagnosticRecord('refine_saved', { message: target.index, swipe: target.swipeIndex, characters: Object.keys(state.characters ?? {}).length });
 
@@ -3150,6 +3435,7 @@ function handleIncomingMessage(index) {
     lastCompletedAssistant = { metadata: getContext().chatMetadata, message };
 
     diagnosticResponse(message, entry.index);
+    sharedCompactReport(message);
     const suspended = syncNsfwSuspension({ notify: true });
     if (suspended) {
         diagnosticRecord('collection_skipped', { reason: 'nsfw_owner', message: entry.index, ...diagnosticState() });
@@ -3164,7 +3450,8 @@ function handleIncomingMessage(index) {
             const clean = stripStateTag(message.swipes[swipe]);
             if (clean !== message.swipes[swipe]) { message.swipes[swipe] = clean; changed = true; }
         }
-        if (changed) { rerenderMessage(entry.index, message); persistChat(); }
+        if (changed) { rerenderMessage(entry.index, message); persistChat(); bodyTokenCounter.cleaned(message); }
+        bodyTokenCounter.refresh(message);
         updateUi();
         return;
     }
@@ -4318,6 +4605,8 @@ function registerEvents() {
     });
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
+        interruptSceneRefine();
+        bodyTokenCounter.reset();
         diagnosticRecord('chat_changed');
         resetDiagnosticEvidence();
         rewriteGeneration = null;
@@ -4396,6 +4685,8 @@ export function onEnable() {
 }
 
 export function onDisable() {
+    interruptSceneRefine();
+    bodyTokenCounter.reset();
     runtimeActive = false;
     stopDiagnosticFetch();
     stopStateTagDisplayGuard();
@@ -4444,6 +4735,149 @@ export function onClean() {
     context.saveSettingsDebounced();
     clearInjectedPrompt();
 }
+
+
+function slowBurnTurnProgress() {
+    const result = sessionTurns(getChatMeta(false), getContext().chat, isPendingAssistant);
+    if (result.changed) saveChatMeta();
+    return result;
+}
+
+// Standalone protocol v2. Each extension keeps its own settings and scene controller.
+const STANDALONE_KIND = 'sfw';
+const SHARED_REPORT_KEY = 'ttottoCompactScene';
+const compactRepairRecords = new WeakMap();
+const compactConsumed = new WeakMap();
+let sceneGenerationRevision = 0;
+
+function compactPeer() {
+    const peer = STANDALONE_KIND === 'sfw' ? globalThis.ttottoNsfwSceneBridge : globalThis.ttottoSfwSceneBridge;
+    return peer?.reportVersion === 2 && peer.reportSettings?.() ? peer : null;
+}
+function compactReportsEnabled() {
+    const other = STANDALONE_KIND === 'sfw' ? 'nsfw' : 'sfw';
+    const context = getContext(), settings = context.extensionSettings?.[`ttotto-${other}`];
+    const meta = context.chatMetadata?.[other === 'sfw' ? 'ttottoSfw' : 'ttottoNsfw'];
+    const active = settings?.enabled && meta?.enabled !== false && (other !== 'nsfw' || settings.adultConfirmed);
+    // An older peer cannot read v2. Retain the legacy shapes until both are updated.
+    return !active || Boolean(compactPeer());
+}
+function standaloneReportOptions(stageActive = true) {
+    const peer = compactPeer(), own = getSettings();
+    const sfw = STANDALONE_KIND === 'sfw' ? own : (peer?.reportSettings() ?? {});
+    const nsfw = STANDALONE_KIND === 'nsfw' ? own : (peer?.reportSettings() ?? {});
+    return { sfw, nsfw: stageActive ? nsfw : { ...nsfw, slowBurnEnabled: false },
+        sfwEnabled: STANDALONE_KIND === 'sfw' || Boolean(peer),
+        monitor: Boolean(STANDALONE_KIND === 'sfw' && peer && nsfw.armMode !== 'stealth') };
+}
+function standaloneHeatRules() {
+    return STANDALONE_KIND === 'nsfw' ? HEAT_SCALE_LINES : (compactPeer()?.heatRules?.() ?? []);
+}
+function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuidance = '') {
+    if (!compactReportsEnabled()) return legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance);
+    return compactReportLines(STANDALONE_KIND, standaloneReportOptions(), {
+        heatRules: standaloneHeatRules(),
+        stageRules: STANDALONE_KIND === 'nsfw' ? SLOW_BURN_STAGE_REPORT_RULES : [],
+        nextGuidance: STANDALONE_KIND === 'sfw' ? dialogueOrGuidance : nextGuidance,
+    });
+}
+function refinePromptMessages() {
+    if (!compactReportsEnabled()) return legacyRefinePromptMessages();
+    const settings = getSettings();
+    const preferenceText = settings.cardLinkEnabled && settings.nextBeatHints ? cardLinkPreferenceText() : '';
+    return [
+        { role: 'system', content: compactReportLines(STANDALONE_KIND, standaloneReportOptions(isFullyArmed()), {
+            repair: true, heatRules: standaloneHeatRules(),
+            stageRules: STANDALONE_KIND === 'nsfw' ? SLOW_BURN_STAGE_REPORT_RULES : [],
+        }).join('\n') },
+        { role: 'user', content: `${preferenceText ? `CHARACTER PREFERENCES:\n${preferenceText}\n\n` : ''}Log excerpt (oldest first):\n\n${buildRefineInput()}` },
+    ];
+}
+function saveSharedCompact(message, raw) {
+    if (!message || raw?._v !== 2 || !sanitizeState(raw)) return null;
+    message.extra ??= {};
+    const store = message.extra[SHARED_REPORT_KEY] ??= { swipes: {} };
+    store.swipes ??= {};
+    const key = String(currentSwipeIndex(message)), signature = messageStateSignature(message);
+    const previous = store.swipes[key];
+    if (previous?.signature === signature && JSON.stringify(previous.raw) === JSON.stringify(raw)) return previous.raw;
+    store.swipes[key] = { signature, raw };
+    persistChat();
+    return raw;
+}
+function sharedCompactReport(message) {
+    if (!message || message.is_user || message.is_system || isPendingAssistant(message)) return null;
+    const collecting = !generationEvents.some(type => ALLOWED_GENERATION_TYPES.has(type)) && !holdsRewriteGeneration();
+    const raw = collecting ? readCompactReport(message.mes, parseStateJson) : null;
+    if (raw) return saveSharedCompact(message, raw);
+    // A new malformed/legacy report must not resurrect an older compact record.
+    if (/<(?:scene_state|sfw_scene)\b/i.test(String(message.mes ?? ''))) return null;
+    const record = message.extra?.[SHARED_REPORT_KEY]?.swipes?.[String(currentSwipeIndex(message))];
+    return record?.signature === messageStateSignature(message) ? record.raw : null;
+}
+function takeCompactState(message, raw) {
+    if (!raw) return null;
+    const key = `${currentSwipeIndex(message)}:${messageStateSignature(message)}`;
+    const previous = compactConsumed.get(message);
+    if (previous?.raw === raw && previous.key === key) return null;
+    const state = sanitizeState(raw);
+    if (state) compactConsumed.set(message, { raw, key });
+    return state;
+}
+function receiveCompactRepair(raw, message) {
+    if (!isSupervising() || !getContext().chat?.includes(message) || isPendingAssistant(message)
+        || generationEvents.some(type => ALLOWED_GENERATION_TYPES.has(type))) return;
+    const state = sanitizeState(raw);
+    if (!state) return;
+    saveSharedCompact(message, raw);
+    takeCompactState(message, raw);
+    const at = Date.now();
+    getMessageStore(message).swipes[String(currentSwipeIndex(message))] = {
+        state, at, messageSignature: messageStateSignature(message), signatureVersion: 3,
+    };
+    const meta = getChatMeta(false);
+    if (meta?.manualState?.source === 'ai-refine') meta.manualState = null;
+    if (STANDALONE_KIND === 'nsfw') applyReportedHeat(state, message);
+    persistChat(); saveChatMeta();
+}
+function publishCompactRepair(raw, message) {
+    if (!raw) return;
+    saveSharedCompact(message, raw);
+    takeCompactState(message, raw);
+    compactPeer()?.receiveCompactRepair?.(raw, message);
+}
+function captureSceneRecordGuard(message) {
+    const context = getContext(), metadata = context.chatMetadata;
+    const capture = () => JSON.stringify([
+        message.extra?.ttottoSfw, message.extra?.ttottoNsfw, message.extra?.[SHARED_REPORT_KEY],
+        metadata?.ttottoSfw?.manualState, metadata?.ttottoNsfw?.manualState,
+    ]);
+    const before = capture();
+    return () => getContext().chatMetadata === metadata && capture() === before;
+}
+function interruptSceneRefine() {
+    sceneGenerationRevision++;
+    clearTimeout(refineTimer); refineTimer = null;
+    queuedRefineTarget = null; lastAutoRefineTarget = null;
+    if (refineAbortController) {
+        diagnosticRecord('refine_interrupted', { reason: 'main_generation_changed' });
+        refineAbortController.abort();
+    }
+}
+const bodyTokenCounter = createBodyTokenCounter({
+    raw: getContext, ready: () => runtimeActive,
+    allowed: () => isSupervising() && !generationEvents.some(type => ALLOWED_GENERATION_TYPES.has(type)) && !holdsRewriteGeneration(),
+    epoch: () => sceneGenerationRevision, swipe: currentSwipeIndex, save: persistChat, record: diagnosticRecord,
+});
+if (STANDALONE_KIND === 'sfw') globalThis.ttottoSfwSceneBridge = Object.freeze({
+    reportVersion: 2,
+    reportSettings: () => isSupervising() ? getSettings() : null,
+    // The NSFW caller has already decided it is idle. Ignore a stale suspension
+    // flag here; syncNsfwSuspension resolves it before SFW composes its prompt.
+    canReport: () => isSupervising() && !localNsfwBlocksSfw()
+        && !getContext().chatMetadata?.ttottoNsfw?.bridgePending,
+    receiveCompactRepair,
+});
 
 const bootContext = getContext();
 syncStateTagDisplayGuard();
