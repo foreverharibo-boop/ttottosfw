@@ -1,3 +1,85 @@
+// BEGIN scene-field-size.js
+// Only collected state fields grow; custom prompts and other editors are unchanged.
+const sceneFieldSizes = new WeakMap();
+const observedSceneFields = new Set();
+let sceneFieldObserver = null;
+let sceneFieldResizeBound = false;
+function resizeSceneField(field) {
+    if (!field?.getClientRects?.().length || !field.clientWidth) {
+        if (field) sceneFieldSizes.set(field, 0);
+        return;
+    }
+    const style = globalThis.getComputedStyle?.(field);
+    const border = (parseFloat(style?.borderTopWidth) || 0) + (parseFloat(style?.borderBottomWidth) || 0);
+    const previous = field.style.height;
+    // Preserve the page's scroll anchor while measuring a potentially shorter value.
+    const parent = field.parentElement;
+    const minHeight = parent?.style.minHeight;
+    if (parent) parent.style.minHeight = `${parent.getBoundingClientRect().height}px`;
+    field.style.height = 'auto';
+    const height = `${Math.ceil(field.scrollHeight + border)}px`;
+    field.style.height = height;
+    if (parent) parent.style.minHeight = minHeight;
+    sceneFieldSizes.set(field, field.clientWidth);
+    return height !== previous;
+}
+function autoSizeSceneFields(root = document) {
+    if (!root?.querySelectorAll) return;
+    if (!sceneFieldObserver && typeof ResizeObserver !== 'undefined') {
+        sceneFieldObserver = new ResizeObserver(entries => {
+            for (const { target } of entries) {
+                if (!target.getClientRects().length || sceneFieldSizes.get(target) !== target.clientWidth) resizeSceneField(target);
+            }
+        });
+    }
+    if (!sceneFieldResizeBound) {
+        globalThis.addEventListener?.('resize', () => autoSizeSceneFields());
+        sceneFieldResizeBound = true;
+    }
+    for (const old of observedSceneFields) if (!old.isConnected) {
+        sceneFieldObserver?.unobserve(old); observedSceneFields.delete(old);
+    }
+    for (const field of root.querySelectorAll('textarea.ttotto-scene-textarea')) {
+        if (!observedSceneFields.has(field)) {
+            observedSceneFields.add(field);
+            field.addEventListener('input', () => resizeSceneField(field));
+            sceneFieldObserver?.observe(field);
+        }
+        resizeSceneField(field);
+    }
+}
+
+// END scene-field-size.js
+// BEGIN scene-collection-sfw-ui.js
+// Global SFW description settings, independent of custom prompt scopes.
+function renderSceneCollectionUi() {
+    const settings = getSettings(), config = settings.sceneCollection ?? {};
+    const master = element('tsf-scene-collection-enabled');
+    if (!master) return;
+    master.checked = config.enabled !== false;
+    for (const key of Object.keys(sceneCollectionFields())) {
+        const input = element(`tsf-scene-collect-${key}`);
+        if (!input) continue;
+        input.checked = config.fields?.[key] !== false;
+        input.disabled = !master.checked;
+    }
+}
+function bindSceneCollectionUi() {
+    for (const key of ['enabled', ...Object.keys(sceneCollectionFields())]) {
+        const input = element(key === 'enabled' ? 'tsf-scene-collection-enabled' : `tsf-scene-collect-${key}`);
+        input?.addEventListener('change', () => {
+            const settings = getSettings();
+            const config = settings.sceneCollection ??= {};
+            if (key === 'enabled') config.enabled = input.checked;
+            else (config.fields ??= {})[key] = input.checked;
+            getContext().saveSettingsDebounced?.();
+            clearInjectedPrompt();
+            updateUi();
+        });
+    }
+}
+
+// END scene-collection-sfw-ui.js
 // BEGIN slow-burn-turns.js
 // Logical reply slots, not request counts. No message or body writes.
 // A regenerated reply retains its preceding user turn even when ST replaces
@@ -179,6 +261,37 @@ function createBodyTokenCounter({ raw, ready, allowed, epoch, swipe, save, recor
 // END body-tokens.js
 
 // BEGIN compact-report.js
+// Scene descriptions are optional; control/history fields are never masked.
+function sceneCollectionFields(settings = {}) {
+    const config = settings.sceneCollection ?? {};
+    return Object.fromEntries(['location', 'time', 'environment', 'objects', 'appearance', 'position', 'holding', 'condition', 'contact']
+        .map(key => [key, config.enabled !== false && config.fields?.[key] !== false]));
+}
+
+function filterSceneCollection(raw, settings = {}) {
+    if (!raw || typeof raw !== 'object') return raw;
+    const fields = sceneCollectionFields(settings);
+    if (Object.values(fields).every(Boolean)) return raw;
+    const out = structuredClone(raw);
+    const filter = scene => {
+        if (!scene || typeof scene !== 'object') return;
+        for (const [field, keys] of Object.entries({ location: ['location'], time: ['time'], environment: ['environment'], objects: ['important_objects', 'importantObjects'] })) {
+            if (!fields[field]) for (const key of keys) delete scene[key];
+        }
+        if (scene.characters && typeof scene.characters === 'object') {
+            for (const [name, person] of Object.entries(scene.characters)) {
+                if (!person || typeof person !== 'object') continue;
+                for (const [field, keys] of Object.entries({ appearance: ['appearance', 'clothing'], position: ['position'], holding: ['holding'], condition: ['condition'], contact: ['contact'] })) {
+                    if (!fields[field]) for (const key of keys) delete person[key];
+                }
+                if (!Object.keys(person).length) delete scene.characters[name];
+            }
+        }
+    };
+    filter(out); filter(out.scene);
+    return out;
+}
+
 // One wire record; the existing stores/UI remain backward compatible.
 // Machine keys stay stable. Only descriptive values are Korean, not the RP prose.
 function expandCompactReport(raw, kind) {
@@ -217,7 +330,9 @@ function compactReportLines(kind, options, { repair = false, heatRules = [], sta
     if (active.dialogueBeatGuard || (options.sfwEnabled && sfw.dialogueBeatGuard)) scene.dialogue_beats = [];
     if (sfw.dialogueFlow) scene.dialogue_flow = { topic: '', last_question: '', new_facts: [] };
     if (active.nextBeatHints || (options.sfwEnabled && sfw.nextBeatHints)) scene.next = [];
-    const record = { _v: 2, scene, ...(heat ? { heat: 0 } : {}) };
+    const selected = filterSceneCollection(scene, active);
+    if (selected.characters && !Object.keys(selected.characters).length) delete selected.characters;
+    const record = { _v: 2, scene: selected, ...(heat ? { heat: 0 } : {}) };
     if (kind === 'nsfw' && nsfw.slowBurnEnabled) record.stage = 1;
     const tag = kind === 'nsfw' ? 'scene_state' : 'sfw_scene';
     return [
@@ -225,8 +340,8 @@ function compactReportLines(kind, options, { repair = false, heatRules = [], sta
             : 'STATE REPORT: End your response with exactly one state block (single-line JSON, hidden from the reader). No other scene report:',
         repair ? JSON.stringify(record) : `<${tag}>${JSON.stringify(record)}</${tag}>`,
         'Write descriptive values concisely in Korean only; keep JSON keys, enum values and character names unchanged. Do not add English translations. This language rule applies ONLY to the record, not the story.',
-        'Record facts at the END of the reply. Include every present character and relevant object, including unchanged facts. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
-        'Use RP time only, never the real date/clock. Preserve explicit in-story date/time (including Info_panel); otherwise keep established time context without inventing a clock time.',
+        'Record facts at the END of the reply using ONLY the fields in this schema. Omit disabled fields entirely; do not relocate their descriptions into other fields. For selected fields, include unchanged facts and every relevant character/object. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
+        ...('time' in selected ? ['Use RP time only, never the real date/clock. Preserve explicit in-story date/time (including Info_panel); otherwise keep established time context without inventing a clock time.'] : []),
         'scene_type: general/daily/conversation/romance/conflict/action/investigation; keep it unless the dominant scene changes. intensity: narrative tension 0-10, not sexual heat.',
         ...(scene.stage !== undefined ? ['scene.stage: observed narrative progression 1 setup, 2 engagement, 3 first development, 4 deepening, 5 decisive turn, 6 resolution; not sexual stage or permission to finish.'] : []),
         ...(scene.acts ? ['acts: up to 4 substantive NEW beats from this reply, not routine logistics.'] : []),
@@ -404,7 +519,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.45';
+const EXTENSION_VERSION = '0.2.46';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1830,6 +1945,7 @@ function sanitizeBiArray(value, limit = 8) {
 }
 
 function sanitizeState(raw) {
+    raw = filterSceneCollection(raw, getSettings());
     raw = expandCompactReport(raw, 'sfw');
     if (!raw || typeof raw !== 'object') return null;
     const clean = {
@@ -1901,17 +2017,18 @@ function sanitizeState(raw) {
         && !Object.keys(clean.importantObjects).length && !hasCharacters && !clean.acts.length
         && !clean.dialogueBeats.length && !hasDialogueFlow && clean.intensity === null
         && clean.stage === null && !clean.next.length) return null;
-    return clean;
+    return filterSceneCollection(clean, getSettings());
 }
 
 function stateCompletenessIssues(state, settings = getSettings()) {
     if (!state) return ['state'];
     const issues = [];
-    if (!hasBi(state.location)) issues.push('location');
+    const fields = sceneCollectionFields(settings);
+    if (fields.location && !hasBi(state.location)) issues.push('location');
     const hasCharacterState = Object.values(state.characters ?? {}).some(
         (info) => hasBi(info.appearance) || hasBi(info.position) || hasBi(info.holding) || hasBi(info.condition),
     );
-    if (!hasCharacterState) issues.push('characters');
+    if ((fields.appearance || fields.position || fields.holding || fields.condition) && !hasCharacterState) issues.push('characters');
     if (settings.repeatGuard && !state.acts?.length) issues.push('acts');
     if (state.intensity === null || state.intensity === undefined) issues.push('intensity');
     if (settings.slowBurnEnabled && (state.stage === null || state.stage === undefined)) issues.push('stage');
@@ -2149,19 +2266,19 @@ function manualMatchesLatest(manual, message, snapshot) {
 function effectiveState() {
     const meta = getChatMeta(false);
     if (meta?.nsfwResumePending || meta?.manualState?.source === 'nsfw-handoff') {
-        return { state: latestCurrentSfwSnapshot()?.state ?? latestScenePanelState(), source: 'nsfw-resume' };
+        return { state: filterSceneCollection(latestCurrentSfwSnapshot()?.state ?? latestScenePanelState(), getSettings()), source: 'nsfw-resume' };
     }
     const message = assistantMessages().at(-1);
-    if (!message || isPendingAssistant(message)) return { state: null, source: 'none' };
+    if (!message || isPendingAssistant(message)) return { state: filterSceneCollection(null, getSettings()), source: 'none' };
     const snapshot = snapshotForMessage(message);
     const valid = snapshotMatchesMessage(message, snapshot);
     const manual = meta?.manualState;
     if (manualMatchesLatest(manual, message, snapshot)
         && (!valid || Number(manual.at ?? 0) >= Number(snapshot.at ?? 0))) {
-        return { state: manual.state, source: manual.source ?? 'manual' };
+        return { state: filterSceneCollection(manual.state, getSettings()), source: manual.source ?? 'manual' };
     }
-    if (valid) return { state: snapshot.state, source: 'tag' };
-    return { state: latestScenePanelState(), source: snapshot?.state ? 'body-changed' : 'missing-report' };
+    if (valid) return { state: filterSceneCollection(snapshot.state, getSettings()), source: 'tag' };
+    return { state: filterSceneCollection(latestScenePanelState(), getSettings()), source: snapshot?.state ? 'body-changed' : 'missing-report' };
 }
 
 // Keep the saved report inspectable after an unknown body transformation. It is
@@ -2173,7 +2290,7 @@ function stateForDisplay() {
     const message = assistantMessages().at(-1);
     const snapshot = snapshotForMessage(message);
     if (snapshot?.state && !isPendingAssistant(message) && !snapshotMatchesMessage(message, snapshot)) {
-        return { state: snapshot.state, source: 'body-changed' };
+        return { state: filterSceneCollection(snapshot.state, getSettings()), source: 'body-changed' };
     }
     return current;
 }
@@ -2414,6 +2531,7 @@ function buildCardPreferenceLines() {
 // ───────────────────────── 주입문 생성 ─────────────────────────
 
 function buildStateLines(state) {
+    state = filterSceneCollection(state, getSettings());
     const lines = [];
     if (hasBi(state.location)) lines.push(`- Location: ${biText(state.location, 'en')}`);
     if (hasBi(state.time)) lines.push(`- Time/context: ${biText(state.time, 'en')}`);
@@ -3705,14 +3823,18 @@ function renderStatePanel() {
         intensityBadge.hidden = true;
     }
 
+    const collectionFields = sceneCollectionFields(getSettings());
     const locationInput = element('tsf-state-location');
+    locationInput.closest('label').hidden = !collectionFields.location;
     if (document.activeElement !== locationInput) locationInput.value = biText(state?.location);
 
     const sceneTypeInput = element('tsf-state-scene-type');
     if (document.activeElement !== sceneTypeInput) sceneTypeInput.value = state?.sceneType || 'general';
     const timeInput = element('tsf-state-time');
+    timeInput.closest('label').hidden = !collectionFields.time;
     if (document.activeElement !== timeInput) timeInput.value = biText(state?.time);
     const environmentInput = element('tsf-state-environment');
+    environmentInput.closest('label').hidden = !collectionFields.environment;
     if (document.activeElement !== environmentInput) environmentInput.value = biText(state?.environment);
 
     const objectList = element('tsf-object-list');
@@ -3723,9 +3845,9 @@ function renderStatePanel() {
         row.className = 'tsf-char-field';
         const caption = document.createElement('span');
         caption.textContent = name;
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.className = 'text_pole';
+        const input = document.createElement('textarea');
+        input.rows = 1;
+        input.className = 'text_pole ttotto-scene-textarea';
         input.value = biText(objectState);
         input.addEventListener('change', () => {
             applyManualEdit((draft) => {
@@ -3736,7 +3858,7 @@ function renderStatePanel() {
         row.append(caption, input);
         objectList.append(row);
     }
-    element('tsf-object-empty').hidden = Object.keys(importantObjects).length > 0;
+    element('tsf-object-empty').hidden = Object.keys(importantObjects).length > 0 || !collectionFields.objects;
 
     const list = element('tsf-char-list');
     list.replaceChildren();
@@ -3748,13 +3870,14 @@ function renderStatePanel() {
         title.textContent = name;
         row.append(title);
         for (const [field, label] of [['appearance', '외형·복장'], ['position', '자세·위치'], ['holding', '소지품'], ['condition', '신체 상태']]) {
+            if (!collectionFields[field]) continue;
             const wrap = document.createElement('label');
             wrap.className = 'tsf-char-field';
             const caption = document.createElement('span');
             caption.textContent = label;
-            const input = document.createElement('input');
-            input.type = 'text';
-            input.className = 'text_pole';
+            const input = document.createElement('textarea');
+            input.rows = 1;
+            input.className = 'text_pole ttotto-scene-textarea';
             input.value = biText(info[field]);
             input.addEventListener('change', () => {
                 applyManualEdit((draft) => {
@@ -3767,7 +3890,7 @@ function renderStatePanel() {
         }
         list.append(row);
     }
-    element('tsf-char-empty').hidden = Object.keys(characters).length > 0;
+    element('tsf-char-empty').hidden = Object.keys(characters).length > 0 || !(collectionFields.appearance || collectionFields.position || collectionFields.holding || collectionFields.condition);
 
     const actsList = element('tsf-acts-list');
     actsList.replaceChildren();
@@ -3986,6 +4109,7 @@ function refreshPromptSize(prompt) {
 function updateUi() {
     if (!uiReady) return;
     try {
+        renderSceneCollectionUi();
         const settings = getSettings();
         // 새 채팅에서도 기본 ON 상태를 즉시 만들고 저장한다.
         const meta = getChatMeta();
@@ -4052,6 +4176,7 @@ function updateUi() {
         element('tsf-refine').title = '선택한 보정 연결로 최신 답변을 분석합니다. 추가 AI 호출 비용이 발생합니다.';
         element('tsf-force-arm-label').textContent = isSupervising() ? '개입 해제' : '지금 개입';
         renderStatePanel();
+        autoSizeSceneFields();
 
         const preview = element('tsf-prompt-preview');
         if (!preview.hidden) {
@@ -4078,6 +4203,7 @@ function bindSetting(id, key, parser = (value) => value, after = null) {
 }
 
 function bindUi() {
+    bindSceneCollectionUi();
     bindSetting('tsf-diagnostics-enabled', 'diagnosticsEnabled', Boolean, () => {
         diagnosticRecord('recording_started', diagnosticState());
         renderDiagnostics();
@@ -4774,7 +4900,13 @@ function standaloneHeatRules() {
     return STANDALONE_KIND === 'nsfw' ? HEAT_SCALE_LINES : (compactPeer()?.heatRules?.() ?? []);
 }
 function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuidance = '') {
-    if (!compactReportsEnabled()) return legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance);
+    if (!compactReportsEnabled()) {
+        if (Object.values(sceneCollectionFields(getSettings())).every(Boolean)) return legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance);
+        const lines = compactReportLines('sfw', standaloneReportOptions(), { repair: true, nextGuidance: dialogueOrGuidance });
+        lines[0] = 'STATE REPORT: End the reply with exactly one hidden single-line JSON block:';
+        lines[1] = `<sfw_scene>${JSON.stringify(JSON.parse(lines[1]).scene)}</sfw_scene>`;
+        return lines;
+    }
     return compactReportLines(STANDALONE_KIND, standaloneReportOptions(), {
         heatRules: standaloneHeatRules(),
         stageRules: STANDALONE_KIND === 'nsfw' ? SLOW_BURN_STAGE_REPORT_RULES : [],
@@ -4782,7 +4914,15 @@ function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuida
     });
 }
 function refinePromptMessages() {
-    if (!compactReportsEnabled()) return legacyRefinePromptMessages();
+    if (!compactReportsEnabled()) {
+        const messages = legacyRefinePromptMessages();
+        if (!Object.values(sceneCollectionFields(getSettings())).every(Boolean)) {
+            const lines = compactReportLines('sfw', standaloneReportOptions(), { repair: true });
+            lines[1] = JSON.stringify(JSON.parse(lines[1]).scene);
+            messages[0].content = lines.join('\n');
+        }
+        return messages;
+    }
     const settings = getSettings();
     const preferenceText = settings.cardLinkEnabled && settings.nextBeatHints ? cardLinkPreferenceText() : '';
     return [
@@ -4794,6 +4934,7 @@ function refinePromptMessages() {
     ];
 }
 function saveSharedCompact(message, raw) {
+    if (isFullyArmed()) raw = filterSceneCollection(raw, getSettings());
     if (!message || raw?._v !== 2 || !sanitizeState(raw)) return null;
     message.extra ??= {};
     const store = message.extra[SHARED_REPORT_KEY] ??= { swipes: {} };
@@ -4841,6 +4982,7 @@ function receiveCompactRepair(raw, message) {
     persistChat(); saveChatMeta();
 }
 function publishCompactRepair(raw, message) {
+    raw = filterSceneCollection(raw, getSettings());
     if (!raw) return;
     saveSharedCompact(message, raw);
     takeCompactState(message, raw);

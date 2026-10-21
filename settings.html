@@ -76,7 +76,7 @@
 
         <label class="tsf-field" for="tsf-state-location">
           <span>장소</span>
-          <input id="tsf-state-location" type="text" class="text_pole" placeholder="예: 학교 옥상">
+          <textarea id="tsf-state-location" rows="1" class="text_pole ttotto-scene-textarea" placeholder="예: 학교 옥상"></textarea>
         </label>
 
         <label class="tsf-field" for="tsf-state-scene-type">
@@ -95,12 +95,12 @@
 
         <label class="tsf-field" for="tsf-state-time">
           <span>시간·시간대</span>
-          <input id="tsf-state-time" type="text" class="text_pole" placeholder="예: 목요일 밤 10시경">
+          <textarea id="tsf-state-time" rows="1" class="text_pole ttotto-scene-textarea" placeholder="예: 목요일 밤 10시경"></textarea>
         </label>
 
         <label class="tsf-field" for="tsf-state-environment">
           <span>환경 상태</span>
-          <input id="tsf-state-environment" type="text" class="text_pole" placeholder="예: 불이 꺼진 거실, 현관문 잠김">
+          <textarea id="tsf-state-environment" rows="1" class="text_pole ttotto-scene-textarea" placeholder="예: 불이 꺼진 거실, 현관문 잠김"></textarea>
         </label>
 
         <div class="tsf-section-head tsf-acts-head">
@@ -162,11 +162,11 @@
           </div>
           <label class="tsf-field" for="tsf-state-topic">
             <span>현재 대화 주제</span>
-            <input id="tsf-state-topic" type="text" class="text_pole">
+            <textarea id="tsf-state-topic" rows="1" class="text_pole ttotto-scene-textarea"></textarea>
           </label>
           <label class="tsf-field" for="tsf-state-question">
             <span>답변을 기다리는 직전 질문</span>
-            <input id="tsf-state-question" type="text" class="text_pole">
+            <textarea id="tsf-state-question" rows="1" class="text_pole ttotto-scene-textarea"></textarea>
           </label>
           <div class="tsf-flow-subhead">이번 답변에서 새로 확인된 사실</div>
           <div id="tsf-new-facts-list" class="tsf-acts-list"></div>
@@ -228,6 +228,24 @@
       </section>
 
       <section id="tsf-panel-settings" class="tsf-panel" role="tabpanel" aria-labelledby="tsf-tab-settings" hidden>
+        <details class="tsf-custom-injection tsf-scene-collection">
+          <summary>장면 정보 수집</summary>
+          <label><input id="tsf-scene-collection-enabled" type="checkbox"> 장면 정보 수집 사용</label>
+          <small>끄면 아래 정보를 모두 수집하지 않아요. 서사 강도·진행 단계·반복 방지 기록은 기존 설정대로 유지돼요.</small>
+          <div class="tsf-scene-collection-grid">
+            <label><input id="tsf-scene-collect-location" type="checkbox"> 장소</label>
+            <label><input id="tsf-scene-collect-time" type="checkbox"> 시간</label>
+            <label><input id="tsf-scene-collect-environment" type="checkbox"> 주변 환경</label>
+            <label><input id="tsf-scene-collect-objects" type="checkbox"> 중요한 물건</label>
+            <label><input id="tsf-scene-collect-appearance" type="checkbox"> 외형·복장</label>
+            <label><input id="tsf-scene-collect-position" type="checkbox"> 자세·위치</label>
+            <label><input id="tsf-scene-collect-holding" type="checkbox"> 들고 있는 물건</label>
+            <label><input id="tsf-scene-collect-condition" type="checkbox"> 신체 상태</label>
+          </div>
+          <small>SFW 수집에 공통 적용돼요. 끈 항목의 이전 기록은 삭제하지 않고 표시·주입에서 제외해요. 다시 켜면 현재 답변에 유효한 저장 기록을 사용할 수 있어요.</small>
+        </details>
+
+
         <label class="tsf-setting-row" for="tsf-chat-enabled">
           <span>
             <strong>현재 채팅에서 사용</strong>

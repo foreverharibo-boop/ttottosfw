@@ -614,3 +614,20 @@
 #ttotto-sfw-settings #tsf-panel-diagnostics > small {
     opacity: 0.75;
 }
+
+.tsf-scene-collection[open] > label, .tsf-scene-collection[open] > small { display: block; margin: 8px 0; }
+.tsf-scene-collection-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0; }
+.tsf-scene-collection-grid label { display: flex; align-items: center; gap: 5px; }
+
+.tsf-custom-injection { border: 1px solid var(--SmartThemeBorderColor); border-radius: 8px; padding: 0 10px; margin: 8px 0; }
+.tsf-custom-injection > summary { cursor: pointer; min-height: 34px; padding: 6px 0; font-size: .92em; line-height: 1.4; }
+.tsf-custom-injection[open] { padding-bottom: 10px; }
+
+/* Collected facts wrap and grow instead of scrolling within a one-line box. */
+textarea.text_pole.ttotto-scene-textarea {
+    width: 100%; min-width: 0; box-sizing: border-box;
+    min-height: 2.2em; max-height: none !important;
+    overflow: hidden !important; resize: none;
+    white-space: pre-wrap !important; overflow-wrap: anywhere; word-break: break-word;
+    line-height: 1.45; field-sizing: content;
+}

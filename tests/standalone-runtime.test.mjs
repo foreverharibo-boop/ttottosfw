@@ -45,7 +45,7 @@ function combined(r){return Object.values(r.prompts).join('\n');}
 function schemas(r){return [...combined(r).matchAll(/<(sfw_scene|scene_state)>({[^\n]+})<\/\1>/g)].map(m=>JSON.parse(m[2]));}
 
 test('embedded shared helpers match their independently tested sources',()=>{
-    for(const file of ['slow-burn-turns.js','scene-body.js','body-tokens.js','compact-report.js']){
+    for(const file of ['scene-field-size.js','scene-collection-sfw-ui.js','slow-burn-turns.js','scene-body.js','body-tokens.js','compact-report.js']){
         const embedded=sources[own].split(`// BEGIN ${file}\n`)[1].split(`\n// END ${file}`)[0];
         assert.equal(embedded,fs.readFileSync(new URL('../'+file,import.meta.url),'utf8').replaceAll('export function ','function '));
     }
@@ -138,4 +138,27 @@ test('partial report during main generation cannot be saved through common-state
     const r=setup({mode:own==='nsfw'?'manual':'auto'}),m=msg(own==='nsfw'?8:0);r.context.chat.push(m);
     r.api.beginSceneGeneration('normal',true);assert.equal(r.api.sharedCompactReport(m),null);assert.equal(m.extra.ttottoCompactScene,undefined);
     r.api.finishSceneGeneration('normal');r.collect();assert.ok(m.extra.ttottoCompactScene);
+});
+
+test('SFW collection off removes descriptions but preserves intensity, stages and histories without repair',async()=>{
+ const r=setup({slow:true,autoRefine:true});r.api.getSettings().sceneCollection={enabled:false};r.prepare();
+ const schema=schemas(r)[0].scene;assert.equal(schema.location,undefined);assert.equal(schema.characters,undefined);
+ assert.equal(schema.intensity,0);assert.equal(schema.stage,1);assert.ok(schema.acts);
+ const m=msg();r.context.chat.push(m);r.collect();
+ assert.equal(r.api.effectiveState().state.location,undefined);assert.equal(r.api.effectiveState().state.intensity,3);
+ assert.doesNotMatch(JSON.stringify(m.extra),/코트|이야기 속 저녁|피곤함/);
+ assert.equal(r.timers.size,0);assert.equal(r.calls,0);
+ r.prepare();assert.doesNotMatch(combined(r),/코트|이야기 속 저녁|피곤함/);
+ assert.equal(await r.api.runRefine({manual:true}),true);assert.equal(r.calls,1);
+ assert.doesNotMatch(JSON.stringify(m.extra),/코트|이야기 속 저녁|피곤함/);
+});
+test('SFW selected facts filter old snapshots and restore on re-enable, including legacy schemas',()=>{
+ const r=setup(),m=msg();r.context.chat.push(m);r.collect();const before=JSON.stringify(m.extra);
+ r.api.getSettings().sceneCollection={fields:{time:false,appearance:false}};r.prepare();
+ assert.doesNotMatch(combined(r),/코트|이야기 속 저녁/);assert.match(combined(r),/의자/);
+ assert.equal(JSON.stringify(m.extra),before);
+ r.api.getSettings().sceneCollection={};r.prepare();assert.match(combined(r),/코트/);
+ const old=setup({legacyPeer:true});old.api.getSettings().sceneCollection={enabled:false};old.prepare();
+ assert.equal(schemas(old)[0].location,undefined);assert.equal(schemas(old)[0]._v,undefined);
+ assert.doesNotMatch(old.api.refinePromptMessages()[0].content,/"location"|"appearance"/);
 });

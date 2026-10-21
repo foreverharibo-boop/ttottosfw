@@ -1,0 +1,9 @@
+
+/* Collected facts wrap and grow instead of scrolling within a one-line box. */
+textarea.text_pole.ttotto-scene-textarea {
+    width: 100%; min-width: 0; box-sizing: border-box;
+    min-height: 2.2em; max-height: none !important;
+    overflow: hidden !important; resize: none;
+    white-space: pre-wrap !important; overflow-wrap: anywhere; word-break: break-word;
+    line-height: 1.45; field-sizing: content;
+}
