@@ -1,5 +1,7 @@
 
-.tsf-scene-collection[open] > label, .tsf-scene-collection[open] > small { display: block; margin: 8px 0; }
+.tsf-scene-collection[open] > label { display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 8px; margin: 8px 0; }
+.tsf-scene-collection[open] > label > input[type="checkbox"] { flex: 0 0 auto; width: auto; margin: 0; }
+.tsf-scene-collection[open] > small { display: block; margin: 8px 0; }
 .tsf-scene-collection-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0; }
 .tsf-scene-collection-grid label { display: flex; align-items: center; gap: 5px; }
 
