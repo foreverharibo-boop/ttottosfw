@@ -293,12 +293,21 @@
         <label id="tsf-card-link-setting" class="tsf-setting-row" for="tsf-card-link">
           <span>
             <strong>🧩 CardInject 연동</strong>
-            <small>CardInject가 분석해둔 캐시트 카테고리 중 고른 것을 다음 전개 힌트의 참고 자료로 써요. 개입 중일 때만 주입되고, 다음 전개 힌트가 켜져 있어야 동작해요. 보조 AI 보정 호출에도 같이 전달돼요.</small>
+            <small>고른 캐시트 카테고리를 현재 답변과 전개 후보에 각각 사용할 수 있어요. 해당 모드가 개입할 때만 적용하며, CardInject에서 꺼둔 카테고리도 사용할 수 있어요.</small>
           </span>
           <input id="tsf-card-link" type="checkbox">
         </label>
 
         <div id="tsf-card-link-box" class="tsf-card-link-box" hidden>
+          <label class="tsf-setting-row" for="tsf-card-link-reply">
+            <span><strong>답변에 반영</strong><small>전개 힌트를 꺼도 현재 답변의 캐릭터 설정으로 함께 주입해요.</small></span>
+            <input id="tsf-card-link-reply" type="checkbox">
+          </label>
+          <label class="tsf-setting-row" for="tsf-card-link-next">
+            <span><strong>전개 후보에 참고</strong><small>다음 전개 힌트가 켜져 있으면 후보에 참고해요. 후보를 만드는 보조 AI 보정 요청에도 전달돼요.</small></span>
+            <input id="tsf-card-link-next" type="checkbox">
+          </label>
+          <small>둘 다 켜도 본 답변에는 한 번만 넣어요. 둘 다 끄면 선택은 보관하고 또또에서는 주입하지 않아요.</small>
           <div id="tsf-card-link-list"></div>
           <small id="tsf-card-link-note"></small>
           <button id="tsf-card-link-refresh" class="menu_button" type="button">

@@ -519,7 +519,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.46';
+const EXTENSION_VERSION = '0.2.47';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -693,6 +693,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     dialogueWindow: 2, // 대사 의도를 "또 하지 마" 목록에 올릴 최근 AI 답변 수 (1~6)
     // CardInject 연동: 캐시트 카테고리를 다음 전개 힌트의 참고 자료로 사용 (개입 중에만 주입)
     cardLinkEnabled: false,
+    cardLinkUseReply: true,
+    cardLinkUseNext: true,
     cardLinkSelected: {}, // { [캐릭터 키]: [카테고리 key, ...] }
     // SFW는 잔잔한 장면에서도 연속성이 필요하므로 상시 개입만 사용한다.
     armMode: 'always',
@@ -2519,11 +2521,23 @@ function cardLinkPreferenceText() {
     return lines.join('\n');
 }
 
-function buildCardPreferenceLines() {
+function cardLinkUsage(settings = getSettings(), targetActive = slowBurnTargetProgress().active) {
+    const active = Boolean(settings.cardLinkEnabled && isFullyArmed());
+    return {
+        reply: active && settings.cardLinkUseReply !== false,
+        next: active && settings.cardLinkUseNext !== false && Boolean(settings.nextBeatHints) && !targetActive,
+    };
+}
+
+function buildCardPreferenceLines(usage = cardLinkUsage()) {
+    if (!usage.reply && !usage.next) return [];
     const text = cardLinkPreferenceText();
     if (!text) return [];
     return [
-        'CHARACTER PREFERENCES (from the character sheet — inspiration for choosing what happens next, not a checklist. Never force them, and never contradict the current scene state, hard limits, or user-banned items):',
+        usage.reply ? 'CHARACTER SHEET CONTEXT (apply relevant character traits, voice and preferences to the CURRENT reply):'
+            : 'CHARACTER PREFERENCES (inspiration for choosing what happens next, not a checklist):',
+        'Use only what fits the current scene and user intent. Preferences are not required actions or established scene facts. Never override explicit user changes, hard limits, banned items, or the active target and pacing rules.',
+        ...(usage.next ? ['Also use this same reference for next-beat candidates when relevant; do not repeat it in another reference block.'] : []),
         text,
     ];
 }
@@ -2982,9 +2996,11 @@ function buildInjection() {
         }
     }
 
+    const cardUsage = cardLinkUsage(settings, targetActive);
+    const preferenceLines = buildCardPreferenceLines(cardUsage);
+    if (preferenceLines.length) sections.push('', ...preferenceLines);
+
     if (settings.nextBeatHints && !targetActive) {
-        const preferenceLines = buildCardPreferenceLines();
-        if (preferenceLines.length) sections.push('', ...preferenceLines);
         const beats = resuming ? [] : nextBeatCandidates();
         if (beats.length) {
             sections.push(
@@ -3005,8 +3021,8 @@ function buildInjection() {
     ].filter(Boolean);
     if (styleParts.length) sections.push('', ...styleParts);
 
-    const nextGuidance = settings.nextBeatHints && !targetActive && cardLinkPreferenceText()
-        ? '"next" rule: draw the candidates from the CHARACTER PREFERENCES above when they fit the current scene and stage. Keep them fresh — never repeat "acts" or anything already banned.'
+    const nextGuidance = cardUsage.next && cardLinkPreferenceText()
+        ? '"next" rule: draw the candidates from the character-sheet reference above when they fit the current scene and stage. Keep them fresh — never repeat "acts" or anything already banned.'
         : '';
     sections.push('', ...stateReportLines(settings, nextGuidance));
 
@@ -3155,7 +3171,7 @@ function buildRefineInput() {
 
 function legacyRefinePromptMessages() {
     const settings = getSettings();
-    const preferenceText = settings.cardLinkEnabled && settings.nextBeatHints ? cardLinkPreferenceText() : '';
+    const preferenceText = cardLinkUsage(settings).next ? cardLinkPreferenceText() : '';
     const preferenceRule = preferenceText
         ? '\n- "next" should draw on the CHARACTER PREFERENCES given in the user message where they fit the current scene; they are inspiration only, never a checklist.'
         : '';
@@ -3749,6 +3765,8 @@ function renderCardLinkPanel(settings) {
     if (!box) return;
     box.hidden = !settings.cardLinkEnabled;
     element('tsf-card-link').checked = Boolean(settings.cardLinkEnabled);
+    element('tsf-card-link-reply').checked = settings.cardLinkUseReply !== false;
+    element('tsf-card-link-next').checked = settings.cardLinkUseNext !== false;
     if (!settings.cardLinkEnabled) return;
 
     const list = element('tsf-card-link-list');
@@ -3797,9 +3815,12 @@ function renderCardLinkPanel(settings) {
         label.append(text, input);
         list.append(label);
     }
-    note.textContent = duplicated
-        ? `⚠️ 고른 ${picked}개 중 ${duplicated}개가 CardInject에서도 켜져 있어서 프롬프트에 두 번 들어가요. CardInject에서 그 카테고리를 끄면 개입 중일 때만 주입돼요. (★ = 이름이 성향·취향 관련처럼 보이는 카테고리)`
-        : `고른 ${picked}개는 개입 중일 때만 주입돼요. (★ = 이름이 성향·취향 관련처럼 보이는 카테고리)`;
+    const usesReference = settings.cardLinkUseReply !== false || (settings.cardLinkUseNext !== false && settings.nextBeatHints);
+    note.textContent = !usesReference
+        ? `고른 ${picked}개는 보관 중이에요. 현재 켜진 사용 용도가 없어 또또에서는 주입하지 않아요.`
+        : duplicated
+        ? `⚠️ 고른 ${picked}개 중 ${duplicated}개가 CardInject에서도 켜져 있어서 또또가 주입할 때 중복될 수 있어요. CardInject에서 그 카테고리를 끄면 개입 중일 때만 주입돼요. (★ = 이름이 성향·취향 관련처럼 보이는 카테고리)`
+        : `고른 ${picked}개는 선택한 용도로 개입 중일 때만 주입돼요. (★ = 이름이 성향·취향 관련처럼 보이는 카테고리)`;
 }
 
 function renderStatePanel() {
@@ -4252,6 +4273,8 @@ function bindUi() {
     bindSetting('tsf-dialogue-guard', 'dialogueBeatGuard', Boolean, markFeaturePresetCustom);
     bindSetting('tsf-dialogue-flow', 'dialogueFlow', Boolean, markFeaturePresetCustom);
     bindSetting('tsf-card-link', 'cardLinkEnabled', Boolean);
+    bindSetting('tsf-card-link-reply', 'cardLinkUseReply', Boolean);
+    bindSetting('tsf-card-link-next', 'cardLinkUseNext', Boolean);
     element('tsf-card-link-refresh').addEventListener('click', () => {
         updateUi();
         toastr.info('CardInject 카테고리 목록을 다시 읽었어요.', '🫧또또SFW');
@@ -4924,7 +4947,7 @@ function refinePromptMessages() {
         return messages;
     }
     const settings = getSettings();
-    const preferenceText = settings.cardLinkEnabled && settings.nextBeatHints ? cardLinkPreferenceText() : '';
+    const preferenceText = cardLinkUsage(settings).next ? cardLinkPreferenceText() : '';
     return [
         { role: 'system', content: compactReportLines(STANDALONE_KIND, standaloneReportOptions(isFullyArmed()), {
             repair: true, heatRules: standaloneHeatRules(),
