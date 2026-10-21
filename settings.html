@@ -230,6 +230,14 @@
       <section id="tsf-panel-settings" class="tsf-panel" role="tabpanel" aria-labelledby="tsf-tab-settings" hidden>
         <details class="tsf-custom-injection tsf-scene-collection">
           <summary>장면 정보 수집</summary>
+          <div class="tsf-scene-record-language">
+            <label for="tsf-scene-record-language">장면 기록 언어</label>
+            <select id="tsf-scene-record-language" class="text_pole">
+              <option value="ko">한국어</option>
+              <option value="en">영어</option>
+            </select>
+          </div>
+          <small>새 기록을 선택한 언어로 받아 그대로 표시·주입해요. 기존 기록과 직접 입력한 내용, RP 답변 언어는 바꾸지 않아요.</small>
           <label><input id="tsf-scene-collection-enabled" type="checkbox"> 장면 정보 수집 사용</label>
           <small>끄면 아래 정보를 모두 수집하지 않아요. 서사 강도·진행 단계·반복 방지 기록은 기존 설정대로 유지돼요.</small>
           <div class="tsf-scene-collection-grid">

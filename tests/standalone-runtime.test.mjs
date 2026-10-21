@@ -192,3 +192,40 @@ test('reply-only CardInject is omitted from legacy auxiliary prompts and remains
  const meta=r.api.getChatMeta();Object.assign(meta,{slowBurnTargetActive:true,slowBurnTarget:'TARGET_ACTION',slowBurnSessionActive:true});
  r.prepare();assert.match(combined(r),/TARGET_CARD_MARKER/);assert.doesNotMatch(JSON.stringify(r.api.refinePromptMessages()),/TARGET_CARD_MARKER/);
 });
+
+for (const legacyPeer of [false, true]) test(`record language controls main and auxiliary schemas, including legacy=${legacyPeer}`, () => {
+ const r=setup({mode:own==='nsfw'?'manual':'auto',legacyPeer,slow:true});
+ const settings=r.api.getSettings();
+ for(const language of ['ko','en','ko'])for(const enabled of [true,false]){
+  settings.sceneCollection={language,enabled};r.prepare();
+  const expected=language==='en'?'English only':'Korean only',excluded=language==='en'?'Korean only':'English only';
+  assert.ok(combined(r).includes(expected));assert.ok(!combined(r).includes(excluded));
+  assert.doesNotMatch(combined(r),/[가-힣]/,'built-in instructions must not inject Korean labels');
+  const system=r.api.refinePromptMessages()[0].content;assert.ok(system.includes(expected));assert.ok(!system.includes(excluded));assert.doesNotMatch(system,/[가-힣]/);
+ }
+});
+test('changing record language keeps old Korean history and preserves new English values for display and reinjection',()=>{
+ const r=setup({mode:own==='nsfw'?'manual':'auto'}),old=msg(own==='nsfw'?8:0);
+ r.context.chat.push(old);r.collect();const before=JSON.stringify(old.extra);
+ r.api.getSettings().sceneCollection={language:'en'};r.prepare();assert.match(combined(r),/English only/);assert.match(combined(r),/코트/);assert.equal(JSON.stringify(old.extra),before);
+ const raw=wire(own==='nsfw'?8:0);raw.scene.location='Living room';raw.scene.characters.A.appearance='A blue coat';
+ const tag=own==='sfw'?'sfw_scene':'scene_state',m={mes:'New reply.'+`<${tag}>${JSON.stringify(raw)}</${tag}>`,swipe_id:0,extra:{}};
+ r.context.chat.push(m);r.collect();r.prepare();
+ assert.equal(r.api.effectiveState().state.location.ko,'Living room','display getter preserves English text');
+ assert.match(combined(r),/Living room/);assert.match(combined(r),/A blue coat/);
+ r.api.getSettings().sceneCollection.language='ko';r.prepare();assert.match(combined(r),/Korean only/);assert.match(combined(r),/Living room/);
+ assert.equal(JSON.stringify(old.extra),before);assert.equal(r.calls,0);
+});
+test('record language governs the actual auxiliary request and returned values',async()=>{
+ const r=setup({mode:own==='nsfw'?'manual':'auto'});r.context.chat.push(msg(own==='nsfw'?8:0));r.collect();
+ r.api.getSettings().sceneCollection={language:'en'};let request;
+ r.context.generateRaw=async args=>{request=args;const raw=wire(own==='nsfw'?8:0);raw.scene.location='English repair location';return JSON.stringify(raw);};
+ assert.equal(await r.api.runRefine({manual:true}),true);assert.match(JSON.stringify(request),/English only/);assert.doesNotMatch(JSON.stringify(request),/Korean only/);
+ assert.equal(r.api.effectiveState().state.location.ko,'English repair location');r.prepare();assert.match(combined(r),/English repair location/);
+});
+for(const kind of ['sfw','nsfw'])test(`paired ${kind} record language follows the authoring mode`,{skip:!peerPath},()=>{
+ const r=setup({kinds:['sfw','nsfw'],mode:kind==='nsfw'?'manual':'stealth'});
+ r.env.sfw.getSettings().sceneCollection={language:'ko'};r.env.nsfw.getSettings().sceneCollection={language:'en'};r.prepare();
+ const prompt=r.env[kind].buildInjection();assert.match(prompt,kind==='sfw'?/Korean only/:/English only/);
+ assert.doesNotMatch(prompt,kind==='sfw'?/English only/:/Korean only/);
+});

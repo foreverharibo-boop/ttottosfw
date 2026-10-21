@@ -56,6 +56,8 @@ function renderSceneCollectionUi() {
     const settings = getSettings(), config = settings.sceneCollection ?? {};
     const master = element('tsf-scene-collection-enabled');
     if (!master) return;
+    const language = element('tsf-scene-record-language');
+    if (language) language.value = config.language === 'en' ? 'en' : 'ko';
     master.checked = config.enabled !== false;
     for (const key of Object.keys(sceneCollectionFields())) {
         const input = element(`tsf-scene-collect-${key}`);
@@ -65,6 +67,14 @@ function renderSceneCollectionUi() {
     }
 }
 function bindSceneCollectionUi() {
+    element('tsf-scene-record-language')?.addEventListener('change', event => {
+        const value = event.target.value;
+        if (!['ko', 'en'].includes(value)) return;
+        (getSettings().sceneCollection ??= {}).language = value;
+        getContext().saveSettingsDebounced?.();
+        clearInjectedPrompt();
+        updateUi();
+    });
     for (const key of ['enabled', ...Object.keys(sceneCollectionFields())]) {
         const input = element(key === 'enabled' ? 'tsf-scene-collection-enabled' : `tsf-scene-collect-${key}`);
         input?.addEventListener('change', () => {
@@ -261,6 +271,16 @@ function createBodyTokenCounter({ raw, ready, allowed, epoch, swipe, save, recor
 // END body-tokens.js
 
 // BEGIN compact-report.js
+// Select the language of newly requested record values; never translate saved/user text.
+function sceneRecordLanguage(settings = {}) {
+    return settings.sceneCollection?.language === 'en' ? 'English' : 'Korean';
+}
+
+function applySceneReportLanguage(text, settings = {}) {
+    return text.replaceAll('Korean only', `${sceneRecordLanguage(settings)} only`)
+        .replaceAll('Do not add English translations.', 'Do not add translations.');
+}
+
 // Scene descriptions are optional; control/history fields are never masked.
 function sceneCollectionFields(settings = {}) {
     const config = settings.sceneCollection ?? {};
@@ -339,7 +359,7 @@ function compactReportLines(kind, options, { repair = false, heatRules = [], sta
         repair ? 'Read the RP log and return ONLY one JSON object matching this schema:'
             : 'STATE REPORT: End your response with exactly one state block (single-line JSON, hidden from the reader). No other scene report:',
         repair ? JSON.stringify(record) : `<${tag}>${JSON.stringify(record)}</${tag}>`,
-        'Write descriptive values concisely in Korean only; keep JSON keys, enum values and character names unchanged. Do not add English translations. This language rule applies ONLY to the record, not the story.',
+        `Write descriptive values concisely in ${sceneRecordLanguage(active)} only; keep JSON keys, enum values and character names unchanged. Do not add translations. This language rule applies ONLY to the record, not the story.`,
         'Record facts at the END of the reply using ONLY the fields in this schema. Omit disabled fields entirely; do not relocate their descriptions into other fields. For selected fields, include unchanged facts and every relevant character/object. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
         ...('time' in selected ? ['Use RP time only, never the real date/clock. Preserve explicit in-story date/time (including Info_panel); otherwise keep established time context without inventing a clock time.'] : []),
         'scene_type: general/daily/conversation/romance/conflict/action/investigation; keep it unless the dominant scene changes. intensity: narrative tension 0-10, not sexual heat.',
@@ -519,7 +539,7 @@ const PROMPT_KEY = 'ttotto_sfw_continuity';
 const CHAT_STATE_KEY = 'ttottoSfw';
 const MESSAGE_EXTRA_KEY = 'ttottoSfw';
 const LOG_PREFIX = '[🫧또또SFW]';
-const EXTENSION_VERSION = '0.2.48';
+const EXTENSION_VERSION = '0.2.49';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -2852,7 +2872,7 @@ function legacyStateReportLines(settings, nextGuidance = '') {
         '"time":"current time or time context, Korean only"',
         '"environment":"scene-relevant environmental state, Korean only"',
         '"important_objects":{"object name":"current location/condition, Korean only"}',
-        '"characters":{"이름":{"appearance":"current appearance/clothing, Korean only","position":"current posture/position, Korean only","holding":"currently holding/carrying, Korean only","condition":"current physical condition, Korean only"}}',
+        '"characters":{"name":{"appearance":"current appearance/clothing, Korean only","position":"current posture/position, Korean only","holding":"currently holding/carrying, Korean only","condition":"current physical condition, Korean only"}}',
     ];
     if (settings.dialogueFlow) {
         fields.push('"dialogue_flow":{"topic":"current conversation topic, Korean only","last_question":"most recent direct CHARACTER question still awaiting a response, Korean only","new_facts":["0-3 facts newly established in this response, each Korean only"]}');
@@ -2909,7 +2929,7 @@ function buildHandoffReport() {
         'Keep the separately requested <scene_state> report. The one-report limit applies once per tag type; on an everyday return include both reports, with <sfw_scene> last.',
         schema,
         'Fill the report from the situation at the END of THIS response. Include every present character, their appearance/clothing, posture, held items and condition, plus scene-relevant important objects and their current locations/conditions. Do not copy old scene states; do not invent absent people or objects.',
-        'Copy the exact Info_panel date/time if present. Each string is concise Korean only. Use valid single-line JSON. Never replace real values with no_change or unchanged.',
+        `Copy the exact Info_panel date/time if present. Each string is concise ${sceneRecordLanguage(settings)} only. Use valid single-line JSON. Never replace real values with no_change or unchanged.`,
         'intensity means narrative tension (0-10), NOT sexual heat; report the actual value. If stage is included, report the current progression of the returned scene type (1-6). acts describes new substantive beats; next describes fresh future possibilities. Empty objects are allowed only when no relevant objects are established.',
     ].join('\n');
 }
@@ -4924,7 +4944,7 @@ function standaloneHeatRules() {
 }
 function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuidance = '') {
     if (!compactReportsEnabled()) {
-        if (Object.values(sceneCollectionFields(getSettings())).every(Boolean)) return legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance);
+        if (Object.values(sceneCollectionFields(getSettings())).every(Boolean)) return legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance).map(line => applySceneReportLanguage(line, getSettings()));
         const lines = compactReportLines('sfw', standaloneReportOptions(), { repair: true, nextGuidance: dialogueOrGuidance });
         lines[0] = 'STATE REPORT: End the reply with exactly one hidden single-line JSON block:';
         lines[1] = `<sfw_scene>${JSON.stringify(JSON.parse(lines[1]).scene)}</sfw_scene>`;
@@ -4939,6 +4959,7 @@ function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuida
 function refinePromptMessages() {
     if (!compactReportsEnabled()) {
         const messages = legacyRefinePromptMessages();
+        messages[0].content = applySceneReportLanguage(messages[0].content, getSettings());
         if (!Object.values(sceneCollectionFields(getSettings())).every(Boolean)) {
             const lines = compactReportLines('sfw', standaloneReportOptions(), { repair: true });
             lines[1] = JSON.stringify(JSON.parse(lines[1]).scene);

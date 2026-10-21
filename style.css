@@ -625,6 +625,9 @@
 .tsf-custom-injection > summary { cursor: pointer; min-height: 34px; padding: 6px 0; font-size: .92em; line-height: 1.4; }
 .tsf-custom-injection[open] { padding-bottom: 10px; }
 
+.tsf-scene-record-language { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.tsf-scene-record-language select { flex: 1 1 100px; width: auto; min-width: 0; max-width: 100%; box-sizing: border-box; }
+
 /* Collected facts wrap and grow instead of scrolling within a one-line box. */
 textarea.text_pole.ttotto-scene-textarea {
     width: 100%; min-width: 0; box-sizing: border-box;
